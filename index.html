@@ -833,6 +833,13 @@ html[data-dark="true"] .tab-number{stroke:#f4f3ef!important}
 .kantele-note-input{width:4.2em;padding:2px 4px;font-size:0.85rem}
 .kantele-tuning-wrap{display:flex;flex-direction:column;gap:6px;align-items:flex-start}
 #kanteleAutofillBtn{font-size:0.85rem;padding:4px 10px;cursor:pointer;border-radius:4px}
+.kalimba-tab-import-panel{margin:10px 0;padding:12px;border:1px solid var(--theme-border,#7f9bb8);border-radius:8px;background:var(--theme-soft,#dce8f5);display:flex;flex-direction:column;gap:8px}
+.kalimba-tab-import-head span{display:block;font-size:0.85rem;opacity:0.85;margin-top:2px}
+.kalimba-tab-import-panel label{display:flex;flex-direction:column;gap:4px;font-size:0.9rem}
+.kalimba-tab-import-panel textarea{min-height:100px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:0.9rem}
+.kalimba-tab-import-actions{display:flex;gap:8px;flex-wrap:wrap}
+.kalimba-tab-status{font-size:0.85rem;margin:0}
+#midiImportStatus,#kalimbaTabStatus{min-height:1.2em}
 </style>
 </head>
 <body>
@@ -881,6 +888,7 @@ html[data-dark="true"] .tab-number{stroke:#f4f3ef!important}
         <option value="tamburitza">Tamburitza (12-TET)</option>
         <option value="dulcimer">Appalachian dulcimer</option>
         <option value="kantele" selected>Kantele</option>
+        <option value="kalimba">Kalimba</option>
       </select>
     </label>
     <label id="tuningControl" hidden>Santoor tuning
@@ -944,20 +952,14 @@ html[data-dark="true"] .tab-number{stroke:#f4f3ef!important}
     </label>
 
     <div id="kanteleControl" class="kantele-control" hidden>
-      <label>Kantele strings
+      <label id="openTineCountLabel">Kantele strings
         <select id="kanteleStringCount">
-          <option value="5" selected>5 strings</option>
-          <option value="7">7 strings</option>
-          <option value="9">9 strings</option>
-          <option value="10">10 strings</option>
-          <option value="12">12 strings</option>
-          <option value="16">16 strings</option>
-          <option value="32">32 strings</option>
+          <!-- options filled by JS depending on instrument -->
         </select>
       </label>
       <div class="kantele-tuning-wrap">
-        <span>Open-string tuning (lowest string = 1)</span>
-        <button id="kanteleAutofillBtn" type="button" title="Analyse the current tune and fill open strings: lowest notes on lowest strings, prefer naturals, add accidentals only when there are enough strings">Autofill from tune</button>
+        <span id="openTineTuningLabel">Open-string tuning (lowest = 1)</span>
+        <button id="kanteleAutofillBtn" type="button" title="Analyse the current tune and fill open tines/strings: lowest notes on lowest numbers, prefer naturals, add accidentals only when there are enough tines">Autofill from tune</button>
         <div id="kanteleStringInputs" class="kantele-string-inputs"></div>
       </div>
     </div>
@@ -1027,6 +1029,8 @@ html[data-dark="true"] .tab-number{stroke:#f4f3ef!important}
         <button id="importMidiBtn" type="button">Import MIDI</button>
         <input id="midiFileInput" type="file" accept=".mid,.midi,audio/midi,audio/x-midi" hidden>
 
+        <button id="importKalimbaTabBtn" type="button" title="Paste a kalimba number or letter tab and convert it to editable ABC">Paste kalimba tab</button>
+
         <label id="midiTrackControl" class="midi-track-control" hidden>
           Track
           <select id="midiTrackSelect"></select>
@@ -1038,6 +1042,33 @@ html[data-dark="true"] .tab-number{stroke:#f4f3ef!important}
         </label>
 
         <span id="midiImportStatus" class="midi-import-status" role="status"></span>
+      </div>
+
+      <div id="kalimbaTabImportPanel" class="kalimba-tab-import-panel" hidden>
+        <div class="kalimba-tab-import-head">
+          <strong>Convert kalimba tab → ABC</strong>
+          <span>Paste number tabs (1 2 3 1° 5) or letter tabs (C D E C° G). Chords in (1 3 5) or (C E G). Then convert to editable sheet music.</span>
+        </div>
+        <label>Title
+          <input id="kalimbaTabTitle" type="text" placeholder="Untitled kalimba tune" value="Kalimba tune">
+        </label>
+        <label>Key / base (for number tabs 1=do)
+          <select id="kalimbaTabKey">
+            <option value="C" selected>C major (1 = C)</option>
+            <option value="G">G major (1 = G)</option>
+            <option value="D">D major (1 = D)</option>
+            <option value="F">F major (1 = F)</option>
+            <option value="A">A minor (1 = A)</option>
+          </select>
+        </label>
+        <label>Kalimba tab
+          <textarea id="kalimbaTabInput" rows="6" placeholder="Examples:&#10;1 1 5 5 6 6 5&#10;5 5 6 5 1° 7&#10;C C G G A A G&#10;(1 3 5) 1 2 3"></textarea>
+        </label>
+        <div class="kalimba-tab-import-actions">
+          <button id="kalimbaTabConvertBtn" type="button">Convert to ABC</button>
+          <button id="kalimbaTabCancelBtn" type="button">Cancel</button>
+        </div>
+        <p id="kalimbaTabStatus" class="kalimba-tab-status" role="status"></p>
       </div>
 
       <textarea id="abcInput" spellcheck="false"></textarea>
@@ -3253,16 +3284,70 @@ const KANTELE_TUNING_STATE={
   32:['C3','D3','E3','F3','G3','A3','B3','C4','D4','E4','F4','G4','A4','B4','C5','D5','E5','F5','G5','A5','B5','C6','D6','E6','F6','G6','A6','B6','C7','D7','E7','F7']
 };
 
+// Standard C-major kalimba layouts (1 = lowest pitch tine)
+const KALIMBA_TUNING_STATE={
+  8:['C4','D4','E4','F4','G4','A4','B4','C5'],
+  10:['C4','D4','E4','F4','G4','A4','B4','C5','D5','E5'],
+  15:['C4','D4','E4','F4','G4','A4','B4','C5','D5','E5','F5','G5','A5','B5','C6'],
+  17:['C4','D4','E4','F4','G4','A4','B4','C5','D5','E5','F5','G5','A5','B5','C6','D6','E6'],
+  21:['F3','G3','A3','B3','C4','D4','E4','F4','G4','A4','B4','C5','D5','E5','F5','G5','A5','B5','C6','D6','E6']
+};
+
 let ACTIVE_KANTELE={count:5,strings:[]};
 
 function isKantele(){
   return selectedInstrumentId()==='kantele';
 }
 
+function isKalimba(){
+  return selectedInstrumentId()==='kalimba';
+}
+
+/** Both kantele and kalimba use the same open-tine number-tab engine. */
+function isOpenTineInstrument(){
+  return isKantele() || isKalimba();
+}
+
 function selectedKanteleCount(){
   const n=Number(document.getElementById('kanteleStringCount')?.value || 5);
+  if(isKalimba()){
+    const allowed=[8,10,15,17,21];
+    return allowed.includes(n) ? n : 17;
+  }
   const allowed=[5,7,9,10,12,16,32];
   return allowed.includes(n) ? n : 5;
+}
+
+function currentOpenTineState(){
+  return isKalimba() ? KALIMBA_TUNING_STATE : KANTELE_TUNING_STATE;
+}
+
+function populateOpenTineCountSelect(){
+  const sel=document.getElementById('kanteleStringCount');
+  if(!sel) return;
+  const isKal=isKalimba();
+  const options=isKal
+    ? [[8,'8 keys'],[10,'10 keys'],[15,'15 keys'],[17,'17 keys (standard)'],[21,'21 keys']]
+    : [[5,'5 strings'],[7,'7 strings'],[9,'9 strings'],[10,'10 strings'],[12,'12 strings'],[16,'16 strings'],[32,'32 strings']];
+  const current=sel.value;
+  sel.innerHTML='';
+  for(const [val,label] of options){
+    const opt=document.createElement('option');
+    opt.value=String(val);
+    opt.textContent=label;
+    if(isKal && val===17) opt.selected=true;
+    else if(!isKal && val===5) opt.selected=true;
+    sel.appendChild(opt);
+  }
+  // restore previous if still valid
+  if([...sel.options].some(o=>o.value===current)) sel.value=current;
+
+  const countLabel=document.getElementById('openTineCountLabel');
+  const tuningLabel=document.getElementById('openTineTuningLabel');
+  if(countLabel) countLabel.firstChild.textContent=isKal ? 'Kalimba keys ' : 'Kantele strings ';
+  if(tuningLabel) tuningLabel.textContent=isKal
+    ? 'Open-tine tuning (1 = lowest pitch tine)'
+    : 'Open-string tuning (lowest string = 1)';
 }
 
 function midiToNoteName(midi){
@@ -3316,7 +3401,8 @@ function collectTuneMidis(){
 function buildKanteleAutofillPitches(count){
   const used=collectTuneMidis();
   if(!used.length){
-    const fallback=KANTELE_TUNING_STATE[count] || KANTELE_TUNING_STATE[5];
+    const state=currentOpenTineState();
+    const fallback=state[count] || Object.values(state)[0] || ['C4'];
     return fallback.slice(0,count).map(name=>{
       try{ return genericNoteTextToMidi(name); }catch(_){ return 60; }
     });
@@ -3412,14 +3498,14 @@ function buildKanteleAutofillPitches(count){
 }
 
 function autofillKanteleFromTune(){
-  if(!isKantele()) return;
+  if(!isOpenTineInstrument()) return;
 
   const count=selectedKanteleCount();
   const midis=buildKanteleAutofillPitches(count);
   const names=midis.map(midiToNoteName);
 
   // Persist and refresh UI
-  KANTELE_TUNING_STATE[count]=names;
+  currentOpenTineState()[count]=names;
   renderKanteleInputs();
   refreshInstrumentState();
   buildCourseTable();
@@ -3439,7 +3525,8 @@ function saveCurrentKanteleInputs(){
   const inputs=[...document.querySelectorAll('.kantele-note-input')];
   if(!inputs.length) return;
 
-  KANTELE_TUNING_STATE[oldCount]=inputs.map(input=>input.value.trim());
+  const state=currentOpenTineState();
+  state[oldCount]=inputs.map(input=>input.value.trim());
 }
 
 function renderKanteleInputs(){
@@ -3447,7 +3534,8 @@ function renderKanteleInputs(){
   const host=document.getElementById('kanteleStringInputs');
   if(!host) return;
 
-  const values=KANTELE_TUNING_STATE[count].slice(0,count);
+  const state=currentOpenTineState();
+  const values=(state[count] || state[Object.keys(state)[0]] || []).slice(0,count);
   host.innerHTML='';
 
   for(let i=0;i<count;i++){
@@ -3466,7 +3554,7 @@ function renderKanteleInputs(){
 
     input.addEventListener('change',()=>{
       const currentCount=selectedKanteleCount();
-      KANTELE_TUNING_STATE[currentCount]=[
+      currentOpenTineState()[currentCount]=[
         ...document.querySelectorAll('.kantele-note-input')
       ].map(el=>el.value.trim());
 
@@ -3479,22 +3567,24 @@ function renderKanteleInputs(){
     host.appendChild(label);
   }
 
-  KANTELE_TUNING_STATE[count]=values;
+  currentOpenTineState()[count]=values;
   ACTIVE_KANTELE.count=count;
 }
 
 function buildKantele(){
   const count=selectedKanteleCount();
   const inputs=[...document.querySelectorAll('.kantele-note-input')];
+  const state=currentOpenTineState();
+  const defaults=(state[count] || []).slice(0,count);
 
   let names=inputs.length===count
     ? inputs.map(input=>input.value.trim())
-    : KANTELE_TUNING_STATE[count].slice(0,count);
+    : defaults;
 
   const strings=[];
 
   for(let i=0;i<count;i++){
-    const raw=names[i] || KANTELE_TUNING_STATE[count][i];
+    const raw=names[i] || defaults[i] || 'C4';
 
     try{
       const midi=genericNoteTextToMidi(raw);
@@ -3507,7 +3597,7 @@ function buildKantele(){
         hz:midiHz(midi)
       });
     }catch(_){
-      const fallback=KANTELE_TUNING_STATE[count][i];
+      const fallback=defaults[i] || 'C4';
       const midi=genericNoteTextToMidi(fallback);
 
       strings.push({
@@ -3620,14 +3710,16 @@ function chooseKanteleEvents(events){
 
 function kanteleTabLayout(){
   const count=ACTIVE_KANTELE.count || selectedKanteleCount();
+  const unit=isKalimba()?'KEYS':'STRINGS';
+  const name=isKalimba()?'kalimba':'kantele';
 
   return {
     h:50,
     labelGutter:112,
-    rows:[['K',`STRINGS 1–${count}`,27]],
+    rows:[['K',`${unit} 1–${count}`,27]],
     barTop:8,
     barBottom:37,
-    aria:`${count}-string kantele tablature`
+    aria:`${count}-${isKalimba()?'key':'string'} ${name} tablature`
   };
 }
 
@@ -3803,29 +3895,34 @@ function refreshInstrumentState(){
     return;
   }
 
-  if(isKantele()){
+  if(isOpenTineInstrument()){
     if(kanteleControl) kanteleControl.hidden=false;
+    populateOpenTineCountSelect();
+    renderKanteleInputs();
 
     refreshKanteleState();
 
     const tuning=ACTIVE_KANTELE.strings.map(s=>s.note).join(' · ');
+    const name=isKalimba()?'kalimba':'kantele';
+    const unit=isKalimba()?'key':'string';
+    const units=isKalimba()?'keys':'strings';
 
     if(appTitle) appTitle.textContent="Harakka's ABC Archive and Tab Maker";
     document.title="Harakka's ABC Archive and Tab Maker";
-    if(scoreHeading) scoreHeading.textContent='Sheet music + kantele tablature';
-    if(mapTitle) mapTitle.textContent='Kantele open-string map';
+    if(scoreHeading) scoreHeading.textContent=`Sheet music + ${name} tablature`;
+    if(mapTitle) mapTitle.textContent=isKalimba()?'Kalimba open-tine map':'Kantele open-string map';
 
     if(desc){
       desc.textContent=
-        `Unfretted ${ACTIVE_KANTELE.count}-string kantele. Enter the exact open pitch of every string above. `+
-        `The tablature uses one row: numbers 1–${ACTIVE_KANTELE.count} are physical strings. `+
-        `The tune may be shifted by whole octaves to fit the current kantele register. `+
+        `Unfretted ${ACTIVE_KANTELE.count}-${unit} ${name}. Enter the exact open pitch of every ${unit} above. `+
+        `The tablature uses one row: numbers 1–${ACTIVE_KANTELE.count} are physical ${units} (1 = lowest pitch). `+
+        `The tune may be shifted by whole octaves to fit the current register. `+
         `× marks a note that is not present in the current tuning.`;
     }
 
     if(legend){
       legend.textContent=
-        `KANTELE · one tab row · strings 1–${ACTIVE_KANTELE.count} · × = not available in tuning`;
+        `${name.toUpperCase()} · one tab row · ${units} 1–${ACTIVE_KANTELE.count} (1 = lowest) · × = not available in tuning`;
     }
 
     return;
@@ -4888,7 +4985,7 @@ function chooseDulcimerEvents(events){
 }
 
 function chooseInstrumentEvents(events){
-  if(isKantele()) return chooseKanteleEvents(events);
+  if(isOpenTineInstrument()) return chooseKanteleEvents(events);
   if(isCifteli()) return chooseCifteliEvents(events);
   if(isCitera()) return chooseCiteraEvents(events);
   if(isMusimaChordZither()) return chooseMusimaEvents(events);
@@ -4899,25 +4996,38 @@ function chooseInstrumentEvents(events){
 }
 
 
-function tabPitchToAbc(step,accidental='',octaveUps=0){
+// Base pitch-class order for movable-do number tabs (1=do)
+const TAB_DEGREE_ORDER=['C','D','E','F','G','A','B'];
+
+function tabPitchToAbc(step,accidental='',octaveUps=0,baseKey='C'){
   const n=String(step).toUpperCase();
-  const pitchClass={
-    '1':'C','2':'D','3':'E','4':'F','5':'G','6':'A','7':'B',
+  // Fixed letter / solfege names always map to absolute pitches
+  const absolute={
     'DO':'C','RE':'D','MI':'E','FA':'F','SO':'G','SOL':'G','LA':'A','TI':'B','SI':'B',
     'C':'C','D':'D','E':'E','F':'F','G':'G','A':'A','B':'B'
-  }[n];
+  };
+
+  let pitchClass=absolute[n];
+  if(!pitchClass && /^[1-7]$/.test(n)){
+    // Movable-do: 1 = baseKey
+    const baseIdx=TAB_DEGREE_ORDER.indexOf(String(baseKey||'C').toUpperCase().charAt(0));
+    const degree=Number(n)-1;
+    const idx=((baseIdx>=0?baseIdx:0)+degree)%7;
+    pitchClass=TAB_DEGREE_ORDER[idx];
+  }
   if(!pitchClass) return null;
 
   let abcAcc='';
   if(accidental==='#' || accidental==='♯') abcAcc='^';
   else if(accidental==='b' || accidental==='♭') abcAcc='_';
 
+  // octaveUps: 0 = middle (C4 area as C), 1 = one octave up (c), 2+ = c' c'' …
   if(octaveUps<=0) return abcAcc+pitchClass;
   if(octaveUps===1) return abcAcc+pitchClass.toLowerCase();
   return abcAcc+pitchClass.toLowerCase()+"'".repeat(octaveUps-1);
 }
 
-function parseTabNoteToken(token){
+function parseTabNoteToken(token,baseKey='C'){
   let t=String(token||'').trim();
   if(!t) return null;
 
@@ -4925,6 +5035,12 @@ function parseTabNoteToken(token){
   const octaveMark=/[°º˚•˙\u0307'*]/;
   while(t && octaveMark.test(t[t.length-1])){
     octaveUps++;
+    t=t.slice(0,-1);
+  }
+  // Also support a leading lower-octave marker sometimes seen as a trailing underscore or leading dot
+  while(t.endsWith('_') || t.endsWith('.')){
+    // treat trailing . as possible lower-octave in some notations; only if no upper marks were found
+    if(octaveUps===0 && t.endsWith('.')){ /* ignore lone trailing period used as separator */ t=t.slice(0,-1); break; }
     t=t.slice(0,-1);
   }
 
@@ -4938,7 +5054,7 @@ function parseTabNoteToken(token){
     t=t.slice(0,-1);
   }
 
-  return tabPitchToAbc(t,accidental,octaveUps);
+  return tabPitchToAbc(t,accidental,octaveUps,baseKey);
 }
 
 function tokenizeTabLine(line){
@@ -4996,8 +5112,17 @@ function tokenizeTabLine(line){
   return out;
 }
 
-function convertTabTextToAbc(raw){
-  if(/^\s*[A-Za-z]:/m.test(raw)) return null;
+/**
+ * Convert a kalimba-style number/letter tab into ABC.
+ * @param {string} raw
+ * @param {{title?:string, key?:string, force?:boolean}} [opts]
+ * @returns {string|null}
+ */
+function convertTabTextToAbc(raw,opts={}){
+  if(!opts.force && /^\s*[A-Za-z]:/m.test(raw)) return null;
+
+  const baseKey=(opts.key||'C').charAt(0).toUpperCase();
+  const title=(opts.title||'Kalimba tune').trim() || 'Kalimba tune';
 
   const lines=String(raw||'').replace(/\r/g,'').split('\n');
   let noteCount=0;
@@ -5005,6 +5130,7 @@ function convertTabTextToAbc(raw){
   const musicLines=[];
 
   for(const sourceLine of lines){
+    // Skip pure lyric / comment lines that have almost no note tokens
     const tokens=tokenizeTabLine(sourceLine);
     if(!tokens.length) continue;
 
@@ -5042,7 +5168,7 @@ function convertTabTextToAbc(raw){
       }
       if(token===':' || token==='/' || token==='\\') continue;
 
-      const abc=parseTabNoteToken(token);
+      const abc=parseTabNoteToken(token,baseKey);
       if(abc){
         if(chord) chord.push(abc);
         else { music.push(abc); noteCount++; }
@@ -5058,14 +5184,16 @@ function convertTabTextToAbc(raw){
     }
   }
 
-  if(noteCount<3) return null;
-  if(unknownCount>Math.max(2,Math.floor(noteCount*0.35))) return null;
+  if(noteCount<1 && !opts.force) return null;
+  if(noteCount<1) return null;
+  if(!opts.force && unknownCount>Math.max(2,Math.floor(noteCount*0.35))) return null;
 
   return [
     'X:1',
+    `T:${title}`,
     'M:4/4',
     'L:1/8',
-    'K:C',
+    `K:${baseKey}`,
     ...musicLines
   ].join('\n');
 }
@@ -5311,7 +5439,7 @@ function createTabSvg(scoreSvg,mappedNotes){
 
   let layout;
 
-  if(isKantele()){
+  if(isOpenTineInstrument()){
     layout=kanteleTabLayout();
   }else if(isCifteli()){
     layout={
@@ -6008,7 +6136,7 @@ function buildCourseTable(){
   root.classList.toggle('citera-map',isCitera());
   root.classList.toggle('musima-map',isMusimaChordZither());
   root.classList.toggle('dulcimer-map',isDulcimer());
-  root.classList.toggle('kantele-map',isKantele());
+  root.classList.toggle('kantele-map',isOpenTineInstrument());
 
   if(isCifteli()){
     const droneGroup=document.createElement('div');
@@ -6154,12 +6282,15 @@ function buildCourseTable(){
   }
 
 
-  if(isKantele()){
+  if(isOpenTineInstrument()){
     refreshKanteleState();
 
     const group=document.createElement('div');
     group.className='course-group kantele-course-group';
-    group.innerHTML=`<h3>${ACTIVE_KANTELE.count}-string Kantele — open strings only</h3>`;
+    const label=isKalimba()
+      ? `${ACTIVE_KANTELE.count}-key Kalimba — open tines (1 = lowest)`
+      : `${ACTIVE_KANTELE.count}-string Kantele — open strings only`;
+    group.innerHTML=`<h3>${label}</h3>`;
 
     for(const string of ACTIVE_KANTELE.strings){
       const row=document.createElement('div');
@@ -7445,6 +7576,45 @@ document.getElementById('importMidiBtn').addEventListener('click',()=>{
   input.click();
 });
 
+document.getElementById('importKalimbaTabBtn')?.addEventListener('click',()=>{
+  const panel=document.getElementById('kalimbaTabImportPanel');
+  if(!panel) return;
+  panel.hidden=!panel.hidden;
+  if(!panel.hidden){
+    document.getElementById('kalimbaTabInput')?.focus();
+  }
+});
+
+document.getElementById('kalimbaTabCancelBtn')?.addEventListener('click',()=>{
+  const panel=document.getElementById('kalimbaTabImportPanel');
+  if(panel) panel.hidden=true;
+});
+
+document.getElementById('kalimbaTabConvertBtn')?.addEventListener('click',()=>{
+  const raw=document.getElementById('kalimbaTabInput')?.value || '';
+  const title=document.getElementById('kalimbaTabTitle')?.value || 'Kalimba tune';
+  const key=document.getElementById('kalimbaTabKey')?.value || 'C';
+  const status=document.getElementById('kalimbaTabStatus');
+
+  const abc=convertTabTextToAbc(raw,{title,key,force:true});
+  if(!abc){
+    if(status) status.textContent='Could not parse any notes. Check the tab (numbers 1–7, letters C–B, optional ° for higher octave, chords in parentheses).';
+    return;
+  }
+
+  document.getElementById('abcInput').value=abc;
+  // Prefer showing it on kalimba if that instrument exists
+  const preset=document.getElementById('instrumentPreset');
+  if(preset && [...preset.options].some(o=>o.value==='kalimba')){
+    preset.value='kalimba';
+    preset.dispatchEvent(new Event('change'));
+  }
+  if(status) status.textContent='Converted to ABC — you can now edit the sheet music and the number tab.';
+  const panel=document.getElementById('kalimbaTabImportPanel');
+  if(panel) panel.hidden=true;
+  render();
+});
+
 document.getElementById('midiFileInput').addEventListener('change',event=>{
   const file=event.target.files?.[0];
   if(file) importMidiFile(file);
@@ -7609,7 +7779,7 @@ function saveTabAsPdf(){
     const abc=document.getElementById('abcInput')?.value || '';
     const titleMatch=abc.match(/^T:\s*(.+)$/m);
     if(titleMatch) titleText=titleMatch[1].trim();
-    else if(isKantele()) titleText=`${ACTIVE_KANTELE.count || selectedKanteleCount()}-string Kantele`;
+    else if(isOpenTineInstrument()) titleText=`${ACTIVE_KANTELE.count || selectedKanteleCount()}-${isKalimba()?'key Kalimba':'string Kantele'}`;
   }catch(_){}
 
   let printTitle=document.getElementById('printTitle');
@@ -7619,7 +7789,9 @@ function saveTabAsPdf(){
     const systems=document.getElementById('systems');
     if(systems && systems.parentNode) systems.parentNode.insertBefore(printTitle,systems);
   }
-  printTitle.textContent=titleText + (isKantele() ? ` · ${ACTIVE_KANTELE.count}-string kantele (1 = lowest)` : '');
+  printTitle.textContent=titleText + (isOpenTineInstrument()
+    ? ` · ${ACTIVE_KANTELE.count}-${isKalimba()?'key kalimba':'string kantele'} (1 = lowest)`
+    : '');
 
   // Force both for print if desired, but respect current mode via CSS
   window.print();
@@ -7635,7 +7807,7 @@ document.getElementById('chordGeneratorBtn').addEventListener('click',()=>{
     params.set('tuning',selectedCifteliTuningId());
   }else if(isDulcimer()){
     params.set('tuning',selectedDulcimerTuningId());
-  }else if(isKantele()){
+  }else if(isOpenTineInstrument()){
     refreshKanteleState();
     params.set('strings',String(ACTIVE_KANTELE.count));
     params.set('notes',ACTIVE_KANTELE.strings.map(s=>s.note).join(','));
@@ -7665,7 +7837,9 @@ document.getElementById('downloadBtn').addEventListener('click',()=>{
         .replace(/^-|-$/g,'')
     : '';
 
-  a.download=isKantele()
+  a.download=isKalimba()
+    ? 'kalimba-tune.abc'
+    : isKantele()
     ? 'kantele-tune.abc'
     : isCifteli()
     ? 'cifteli-tune.abc'
