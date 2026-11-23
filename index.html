@@ -811,6 +811,27 @@ html[data-dark="true"] .tab-bar{stroke:#aab2ba!important}
 html[data-dark="true"] .tab-label,html[data-dark="true"] .tab-number,html[data-dark="true"] .tab-strum{fill:var(--theme-primary)!important;color:var(--theme-primary)!important}
 html[data-dark="true"] .tab-number{stroke:#f4f3ef!important}
 </style>
+<style id="display-mode-styles">
+.music-system.display-notation-only .tab-svg,
+.music-system.display-numbers-only .score-host{display:none!important}
+.music-system.display-both .score-host,
+.music-system.display-both .tab-svg{display:block}
+#displayModeControl{margin-left:8px}
+@media print{
+  .music-system.display-notation-only .tab-svg,
+  .music-system.display-numbers-only .score-host{display:none!important}
+  .titlebar .actions, .controls, .editor, .song-library-panel, #audioPlayer, .playback-panel, .course-map, .warnings{display:none!important}
+  .score-panel{width:100%!important}
+  body{background:#fff!important}
+  .music-system{page-break-inside:avoid;margin-bottom:12px}
+  #printTitle{display:block!important;text-align:center;font-size:1.4rem;margin:0 0 12px;color:#000}
+}
+#printTitle{display:none}
+.kantele-string-inputs{display:flex;flex-wrap:wrap;gap:6px;max-height:160px;overflow:auto;padding:4px 0}
+.kantele-string-note{display:flex;align-items:center;gap:4px;font-size:0.85rem}
+.kantele-string-note span{min-width:1.2em;text-align:right;font-weight:600}
+.kantele-note-input{width:4.2em;padding:2px 4px;font-size:0.85rem}
+</style>
 </head>
 <body>
 <main class="container">
@@ -925,19 +946,33 @@ html[data-dark="true"] .tab-number{stroke:#f4f3ef!important}
         <select id="kanteleStringCount">
           <option value="5" selected>5 strings</option>
           <option value="7">7 strings</option>
+          <option value="9">9 strings</option>
+          <option value="10">10 strings</option>
+          <option value="12">12 strings</option>
+          <option value="16">16 strings</option>
+          <option value="32">32 strings</option>
         </select>
       </label>
       <div class="kantele-tuning-wrap">
-        <span>Open-string tuning</span>
+        <span>Open-string tuning (lowest string = 1)</span>
         <div id="kanteleStringInputs" class="kantele-string-inputs"></div>
       </div>
     </div>
+
+    <label id="displayModeControl" class="display-mode-control" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+      <span>Display</span>
+      <select id="scoreDisplayMode">
+        <option value="both" selected>Sheet + Numbers</option>
+        <option value="notation">Sheet music only</option>
+        <option value="numbers">Number notes only</option>
+      </select>
+    </label>
 
     <label id="balalaikaStrumControl" class="checkbox-control" hidden>
       <input type="checkbox" id="balalaikaFullStrum">
       <span>Traditional E–E–A strum + drones</span>
     </label>
-    <div id="legendText" class="legend">KANTELE · single-row string numbers · × = pitch not available</div>
+    <div id="legendText" class="legend">KANTELE · single-row string numbers · lowest string = 1 · × = pitch not available</div>
   </section>
 
   <section class="editor-layout">
@@ -3205,7 +3240,13 @@ function genericFretDisplay(position){
 
 const KANTELE_TUNING_STATE={
   5:['G3','A3','B3','D4','E4'],
-  7:['G3','A3','B3','C4','D4','E4','F♯4']
+  7:['G3','A3','B3','C4','D4','E4','F♯4'],
+  // Common modern D-oriented small kantele defaults (lowest string = 1)
+  9:['A3','B3','C♯4','D4','E4','F♯4','G4','A4','B4'],
+  10:['A3','B3','C♯4','D4','E4','F♯4','G4','A4','B4','D5'],
+  12:['G3','A3','B3','C♯4','D4','E4','F♯4','G4','A4','B4','C♯5','D5'],
+  16:['E3','F♯3','G3','A3','B3','C♯4','D4','E4','F♯4','G4','A4','B4','C♯5','D5','E5','F♯5'],
+  32:['C3','D3','E3','F3','G3','A3','B3','C4','D4','E4','F4','G4','A4','B4','C5','D5','E5','F5','G5','A5','B5','C6','D6','E6','F6','G6','A6','B6','C7','D7','E7','F7']
 };
 
 let ACTIVE_KANTELE={count:5,strings:[]};
@@ -3216,7 +3257,8 @@ function isKantele(){
 
 function selectedKanteleCount(){
   const n=Number(document.getElementById('kanteleStringCount')?.value || 5);
-  return n===7 ? 7 : 5;
+  const allowed=[5,7,9,10,12,16,32];
+  return allowed.includes(n) ? n : 5;
 }
 
 function saveCurrentKanteleInputs(){
@@ -5736,9 +5778,12 @@ function render(){
     let mappedRendered=0;
     const totalRendered=renderedNotes.length;
 
+    const displayMode=document.getElementById('scoreDisplayMode')?.value || 'both';
+    const displayClass=displayMode==='notation'?'display-notation-only':displayMode==='numbers'?'display-numbers-only':'display-both';
+
     for(const scoreSvg of scoreSvgs){
       const block=document.createElement('section');
-      block.className='music-system';
+      block.className='music-system '+displayClass;
 
       const scoreHost=document.createElement('div');
       scoreHost.className='score-host';
@@ -7178,6 +7223,15 @@ document.getElementById('kanteleStringCount').addEventListener('change',()=>{
   render();
 });
 
+document.getElementById('scoreDisplayMode')?.addEventListener('change',()=>{
+  const mode=document.getElementById('scoreDisplayMode').value || 'both';
+  const displayClass=mode==='notation'?'display-notation-only':mode==='numbers'?'display-numbers-only':'display-both';
+  document.querySelectorAll('#systems .music-system').forEach(block=>{
+    block.classList.remove('display-both','display-notation-only','display-numbers-only');
+    block.classList.add(displayClass);
+  });
+});
+
 document.getElementById('instrumentSearch').addEventListener('input',()=>{
   applyInstrumentSearch();
 });
@@ -7371,6 +7425,26 @@ document.getElementById('tuningPreset').addEventListener('change',()=>{
 
 
 function saveTabAsPdf(){
+  // Ensure both staffs are visible for a useful PDF unless the user chose otherwise
+  const mode=document.getElementById('scoreDisplayMode')?.value || 'both';
+  let titleText='Kantele Sheet Music';
+  try{
+    const abc=document.getElementById('abcInput')?.value || '';
+    const titleMatch=abc.match(/^T:\s*(.+)$/m);
+    if(titleMatch) titleText=titleMatch[1].trim();
+    else if(isKantele()) titleText=`${ACTIVE_KANTELE.count || selectedKanteleCount()}-string Kantele`;
+  }catch(_){}
+
+  let printTitle=document.getElementById('printTitle');
+  if(!printTitle){
+    printTitle=document.createElement('h1');
+    printTitle.id='printTitle';
+    const systems=document.getElementById('systems');
+    if(systems && systems.parentNode) systems.parentNode.insertBefore(printTitle,systems);
+  }
+  printTitle.textContent=titleText + (isKantele() ? ` · ${ACTIVE_KANTELE.count}-string kantele (1 = lowest)` : '');
+
+  // Force both for print if desired, but respect current mode via CSS
   window.print();
 }
 
