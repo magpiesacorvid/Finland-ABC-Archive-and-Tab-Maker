@@ -972,7 +972,7 @@ html[data-dark="true"] .tab-number{stroke:#f4f3ef!important}
           <option value="C">C-system (continental)</option>
         </select>
       </label>
-      <span class="legend" style="margin:0">RH only · 5 rows · 15/14/15/14/15 buttons · tab = row:position (1 = high end of row)</span>
+      <span class="legend" style="margin:0">RH only · 5 rows · 15/14/15/14/15 · tab = row:pos · pos 1 = chin (low) · B starts: F/E/F♯/F/E</span>
     </div>
 
     <label id="displayModeControl" class="display-mode-control" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
@@ -3324,19 +3324,34 @@ function isBayan(){
 }
 
 /**
- * Bayan RH 5-row layout.
- * Rows alternate 15 and 14 buttons: [15,14,15,14,15].
- * Numbering: row 1..5, position 1..N along the row (1 = high-pitch end).
+ * Bayan RH 5-row layout (Moscow B-system defaults from player description).
  *
- * Pitch model (standard chromatic CBA):
- * - Along a row consecutive buttons are a minor third (+3 semitones)
- *   when moving from high to low (position 1 → N).
- * - B-system: moving to the next inner row (row+1) is +1 semitone
- *   from the same diagonal reference.
- * - C-system: moving to the next inner row is −1 semitone (mirror diagonal).
- * Rows 4 and 5 duplicate rows 1 and 2 (same pitches) for alternate fingering.
+ * - Position 1 = closest to the player's chin = LOWEST notes on that row.
+ * - Pitch rises along the row as position increases (chin → floor).
+ * - Along a row, consecutive buttons are a minor third apart (+3 semitones).
+ * - Rows alternate 15 and 14 buttons: [15,14,15,14,15].
+ *
+ * B-system (default) — first button (pos 1) on each row:
+ *   Row 1: F
+ *   Row 2: E
+ *   Row 3: F♯
+ *   Row 4: F   (same as row 1 — alternate fingering)
+ *   Row 5: E   (same as row 2)
+ *
+ * C-system — mirrored diagonal; pos-1 starts:
+ *   Row 1: F♯
+ *   Row 2: E
+ *   Row 3: F
+ *   Row 4: F♯
+ *   Row 5: E
+ *
+ * Octave: pos 1 in the 2nd octave (F2/E2/F♯2) so 15 buttons cover ~E2–C6.
  */
 const BAYAN_ROW_LENGTHS=[15,14,15,14,15];
+
+// MIDI for position 1 (chin / low end) on each row
+const BAYAN_B_STARTS=[41,40,42,41,40]; // F2, E2, F♯2, F2, E2
+const BAYAN_C_STARTS=[42,40,41,42,40]; // F♯2, E2, F2, F♯2, E2
 
 let ACTIVE_BAYAN={system:'B',buttons:[]};
 
@@ -3346,30 +3361,24 @@ function selectedBayanSystem(){
 
 function buildBayanButtons(system){
   system=system==='C'?'C':'B';
-  // Start pitch: high end of outer row. Concert instruments go lower;
-  // this gives a practical ~4-octave working range for ABC melodies.
-  // Outer row (row 1), position 1 ≈ C6 for C-system feel / B6-ish for B —
-  // we anchor so mid-range C4–C5 sits comfortably in the middle of the keyboard.
-  const startMidi=system==='B' ? 83 : 84; // B5 or C6 at row1 pos1 (high end)
-  const rowStep=system==='B' ? 1 : -1; // semitone to next inner row
-  const alongRow=-3; // high → low along the row = down a minor third
+  const starts=system==='C' ? BAYAN_C_STARTS : BAYAN_B_STARTS;
+  const alongRow=3; // pos 1 (low/chin) → higher positions = + minor third each
 
   const buttons=[];
-  // Core 3 rows generate unique pitches; rows 4–5 duplicate 1–2
   for(let row=0;row<5;row++){
     const len=BAYAN_ROW_LENGTHS[row];
-    const srcRow=row<3 ? row : row-3; // 0,1,2,0,1
+    const startMidi=starts[row];
     for(let pos=0;pos<len;pos++){
-      const midi=startMidi + srcRow*rowStep + pos*alongRow;
+      const midi=startMidi + pos*alongRow;
       buttons.push({
         row:row+1,
         pos:pos+1,
-        n:String(pos+1),           // shown on the tab row
-        label:`${row+1}:${pos+1}`, // full id
+        n:String(pos+1),
+        label:`${row+1}:${pos+1}`,
         midi,
         note:midiToNoteName(midi),
         hz:typeof midiHz==='function'?midiHz(midi):440,
-        section:'B'+(row+1),       // maps to tab layout row B1..B5
+        section:'B'+(row+1),
         stringNumber:`${row+1}:${pos+1}`
       });
     }
@@ -4079,7 +4088,8 @@ function refreshInstrumentState(){
         `Right-hand 5-row chromatic bayan (${ACTIVE_BAYAN.system}-system). `+
         `Rows alternate 15 and 14 buttons (15/14/15/14/15). `+
         `Tab numbers are row:position (e.g. 3:7 = row 3, button 7). `+
-        `Position 1 is the high-pitch end of each row. Rows 4–5 duplicate rows 1–2. `+
+        `Position 1 is the chin end (lowest notes). B-system row starts: F, E, F♯, F, E. `+
+        `Along each row, buttons rise by minor thirds. Rows 4–5 match rows 1–2. `+
         `× = pitch not on this keyboard (after optional octave fit).`;
     }
     if(legend){
