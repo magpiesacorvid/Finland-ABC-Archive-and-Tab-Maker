@@ -3386,17 +3386,14 @@ function collectTuneMidis(){
 }
 
 /**
- * Build an open-string list of exactly `count` pitches.
+ * Build an open-string list of exactly `count` pitches, anchored so the
+ * tune’s lowest used pitch becomes string 1 (“move it down”).
+ *
  * Rules:
- * 1. Lowest chosen pitches → lowest string numbers.
- * 2. Every natural pitch-class that appears in the tune gets at least one
- *    string (the lowest octave of that class that appears), as long as
- *    there are enough strings. This is why a written C should no longer
- *    become × when the tune actually uses C natural.
- * 3. Remaining slots go to the most frequently used accidentals (and then
- *    higher octaves of already-covered classes if still free).
- * 4. If the tune is smaller than the string count, fill with natural
- *    scale notes continuing the range.
+ * 1. String 1 = lowest MIDI that actually appears in the tune.
+ * 2. Build upward covering used pitch classes (naturals first, then
+ *    frequent accidentals), then fill with natural scale steps.
+ * 3. Result is always sorted low→high so lowest note → string 1.
  */
 function buildKanteleAutofillPitches(count){
   const used=collectTuneMidis();
@@ -3408,90 +3405,89 @@ function buildKanteleAutofillPitches(count){
     });
   }
 
-  // Group by pitch class (0-11). Keep lowest midi + total frequency per class.
-  const byClass=new Map(); // pc -> {lowest, totalCount, isNatural, midis:Set}
+  const minMidi=used[0].midi;
+  const maxMidi=used[used.length-1].midi;
+
+  // Which pitch classes does the tune actually use?
+  const classFreq=new Map();
   for(const u of used){
     const pc=((u.midi%12)+12)%12;
-    let entry=byClass.get(pc);
-    if(!entry){
-      entry={lowest:u.midi,totalCount:0,isNatural:isNaturalMidi(u.midi),midis:new Set()};
-      byClass.set(pc,entry);
-    }
-    entry.lowest=Math.min(entry.lowest,u.midi);
-    entry.totalCount+=u.count;
-    entry.midis.add(u.midi);
+    classFreq.set(pc,(classFreq.get(pc)||0)+u.count);
   }
 
-  const naturalClasses=[...byClass.entries()]
-    .filter(([,e])=>e.isNatural)
-    .sort((a,b)=>a[1].lowest-b[1].lowest); // low to high
-  const accidentalClasses=[...byClass.entries()]
-    .filter(([,e])=>!e.isNatural)
-    .sort((a,b)=>b[1].totalCount-a[1].totalCount || a[1].lowest-b[1].lowest);
+  // Preferred order: naturals that appear (by pitch), then accidentals by frequency
+  const naturalPcs=[0,2,4,5,7,9,11].filter(pc=>classFreq.has(pc));
+  const accidentalPcs=[...classFreq.keys()]
+    .filter(pc=>![0,2,4,5,7,9,11].includes(pc))
+    .sort((a,b)=>classFreq.get(b)-classFreq.get(a));
+  const preferredPcs=[...naturalPcs,...accidentalPcs];
 
-  const chosen=new Set();
+  // Walk upward from the tune’s lowest note and collect pitches whose
+  // class is preferred (or natural filler), always including minMidi.
+  const chosen=[];
+  const havePc=new Set();
+  let cand=minMidi;
+  const hardLimit=maxMidi+24;
 
-  // 1) Guarantee every natural class a string (lowest occurrence)
-  for(const [,e] of naturalClasses){
-    if(chosen.size>=count) break;
-    chosen.add(e.lowest);
-  }
-
-  // 2) Add most-used accidentals (their lowest occurrence)
-  for(const [,e] of accidentalClasses){
-    if(chosen.size>=count) break;
-    chosen.add(e.lowest);
-  }
-
-  // 3) With any remaining slots, add higher octaves that actually appear
-  //    (prefer naturals, then by frequency / pitch)
-  if(chosen.size<count){
-    const extraCandidates=[];
-    for(const u of used){
-      if(!chosen.has(u.midi)){
-        extraCandidates.push(u);
+  while(chosen.length<count && cand<=hardLimit){
+    const pc=((cand%12)+12)%12;
+    const want=
+      cand===minMidi ||
+      (preferredPcs.includes(pc) && !havePc.has(pc)) ||
+      (isNaturalMidi(cand) && preferredPcs.includes(pc));
+    if(want || (isNaturalMidi(cand) && chosen.length>0 && cand<=maxMidi+12)){
+      // Prefer taking a pitch if its class is still missing or it is the floor
+      if(cand===minMidi || !havePc.has(pc) || (isNaturalMidi(cand) && chosen.length<count)){
+        if(!chosen.includes(cand)){
+          chosen.push(cand);
+          havePc.add(pc);
+        }
       }
     }
-    extraCandidates.sort((a,b)=>{
-      const aNat=isNaturalMidi(a.midi)?0:1;
-      const bNat=isNaturalMidi(b.midi)?0:1;
-      return aNat-bNat || b.count-a.count || a.midi-b.midi;
-    });
-    for(const u of extraCandidates){
-      if(chosen.size>=count) break;
-      chosen.add(u.midi);
+    cand++;
+  }
+
+  // Make sure every preferred natural class is represented if we have room
+  for(const pc of preferredPcs){
+    if(havePc.has(pc)) continue;
+    if(chosen.length>=count) break;
+    // lowest midi >= minMidi with this pitch class
+    let m=minMidi+((pc-((minMidi%12)+12)%12+12)%12);
+    if(m<minMidi) m+=12;
+    if(!chosen.includes(m)){
+      chosen.push(m);
+      havePc.add(pc);
     }
   }
 
-  let chosenMidis=[...chosen].sort((a,b)=>a-b);
+  let chosenMidis=[...new Set(chosen)].sort((a,b)=>a-b);
 
-  // 4) Still short? Pad with natural notes continuing the range
+  // Pad upward with naturals if still short
   if(chosenMidis.length<count){
     const have=new Set(chosenMidis);
-    let cand=chosenMidis.length?chosenMidis[chosenMidis.length-1]+1:(used[0]?.midi??60);
+    cand=(chosenMidis.length?chosenMidis[chosenMidis.length-1]:minMidi)+1;
     while(chosenMidis.length<count){
-      if(isNaturalMidi(cand)&&!have.has(cand)){
+      if(isNaturalMidi(cand) && !have.has(cand)){
         chosenMidis.push(cand);
         have.add(cand);
       }
       cand++;
-      if(cand> (used[used.length-1]?.midi??60)+48) break;
-    }
-    cand=chosenMidis.length?Math.min(...chosenMidis)-1:60;
-    while(chosenMidis.length<count){
-      if(isNaturalMidi(cand)&&!have.has(cand)){
-        chosenMidis.unshift(cand);
-        have.add(cand);
-      }
-      cand--;
-      if(cand<12) break;
+      if(cand>maxMidi+48) break;
     }
   }
 
   chosenMidis=[...new Set(chosenMidis)].sort((a,b)=>a-b);
   if(chosenMidis.length>count){
-    // Keep the lowest `count` so the bottom of the range stays covered
+    // Keep the lowest `count` so string 1 stays the bottom of the tune
     chosenMidis=chosenMidis.slice(0,count);
+  }
+
+  // Hard guarantee: the tune’s lowest pitch is on string 1
+  if(chosenMidis.length && chosenMidis[0]!==minMidi){
+    chosenMidis=chosenMidis.filter(m=>m!==minMidi);
+    chosenMidis.unshift(minMidi);
+    chosenMidis=[...new Set(chosenMidis)].sort((a,b)=>a-b);
+    if(chosenMidis.length>count) chosenMidis=chosenMidis.slice(0,count);
   }
 
   return chosenMidis;
@@ -3654,14 +3650,17 @@ function chooseKanteleOctaveShift(events){
     scores.push({shift,matches,total});
   }
 
+  // Prefer more matches; when tied prefer shifting the melody down (negative
+  // shift) so high written notes land on the physical strings; then smaller |shift|.
   scores.sort((a,b)=>
     b.matches-a.matches ||
-    Math.abs(a.shift)-Math.abs(b.shift) ||
-    a.shift-b.shift
+    a.shift-b.shift ||
+    Math.abs(a.shift)-Math.abs(b.shift)
   );
 
   const bestMatches=scores[0]?.matches || 0;
   const zero=scores.find(item=>item.shift===0);
+  // Keep written octave only if it is already one of the best
   if(zero && zero.matches===bestMatches) return 0;
 
   return scores[0]?.shift || 0;
