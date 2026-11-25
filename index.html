@@ -979,7 +979,7 @@ html[data-dark="true"] .tab-number{stroke:#f4f3ef!important}
     <div id="extraPartsControl" class="extra-parts-control" hidden>
       <div class="extra-parts-head">
         <strong>Additional parts</strong>
-        <span>e.g. Säkkijärven polkka on a 5-string + a 10-string kantele</span>
+        <span>e.g. 5-string main + extra part that covers notes the main cannot play</span>
         <button id="addExtraPartBtn" type="button">+ Add part</button>
       </div>
       <div id="extraPartsList" class="extra-parts-list"></div>
@@ -3326,8 +3326,10 @@ const KALIMBA_TUNING_STATE={
 
 let ACTIVE_KANTELE={count:5,strings:[]};
 
-/** Extra kantele/kalimba parts (e.g. 5-string + 10-string on the same tune). */
-let EXTRA_PARTS=[]; // {id, label, instrument:'kantele'|'kalimba', stringCount, tuning:string[]}
+/** Extra kantele/kalimba parts (e.g. 5-string + 10-string on the same tune).
+ *  coverGaps: when true, autofill prioritises notes the main instrument cannot play,
+ *  and the tab only shows numbers for those gap notes. */
+let EXTRA_PARTS=[]; // {id, label, instrument, stringCount, tuning, coverGaps}
 let EXTRA_PART_SEQ=1;
 
 function isKantele(){
@@ -3780,12 +3782,15 @@ function addExtraPart(preset={}){
     ? preset.tuning.slice()
     : defaultTuningForPart(instrument,stringCount);
   const id='part-'+(EXTRA_PART_SEQ++);
-  const label=preset.label || (instrument==='kalimba'
-    ? `Kalimba ${stringCount}`
-    : `Kantele ${stringCount}`);
-  EXTRA_PARTS.push({id,label,instrument,stringCount,tuning});
+  const coverGaps=preset.coverGaps!==false; // default ON — fill what main cannot
+  const label=preset.label || (coverGaps
+    ? (instrument==='kalimba' ? `Gaps · Kalimba ${stringCount}` : `Gaps · Kantele ${stringCount}`)
+    : (instrument==='kalimba' ? `Kalimba ${stringCount}` : `Kantele ${stringCount}`));
+  EXTRA_PARTS.push({id,label,instrument,stringCount,tuning,coverGaps});
   renderExtraPartsList();
-  render();
+  // Auto-tune to gaps when that mode is on
+  if(coverGaps) autofillPartFromTune(id);
+  else render();
 }
 
 function removeExtraPart(id){
@@ -3815,9 +3820,24 @@ function buildPartStrings(part){
   return strings;
 }
 
-function chooseOpenStringEvents(events,strings){
+/** True if any main open string matches this concert midi at octave shift -3..3. */
+function mainCoversMidi(midi,mainSet){
+  if(!mainSet || !mainSet.size) return false;
+  for(let shift=-3;shift<=3;shift++){
+    if(mainSet.has(midi+shift*12)) return true;
+  }
+  return false;
+}
+
+/**
+ * @param {object[]} events
+ * @param {object[]} strings
+ * @param {{skipIfMainCanPlay?:boolean, mainPlayableMidis?:Set<number>}} [opts]
+ * skipIfMainCanPlay: leave blank when main can play the pitch (gap-cover tab)
+ */
+function chooseOpenStringEvents(events,strings,opts={}){
   const result=new Map();
-  // Octave shift for this string set
+  const mainSet=opts.mainPlayableMidis || null;
   let bestShift=0;
   if(SONG_OCTAVE_SHIFT===0){
     let bestMatches=-1;
@@ -3825,6 +3845,7 @@ function chooseOpenStringEvents(events,strings){
       let matches=0;
       for(const event of events){
         for(const pitch of event.pitches||[]){
+          if(opts.skipIfMainCanPlay && mainCoversMidi(pitch.midi,mainSet)) continue;
           if(strings.some(s=>s.midi===pitch.midi+shift*12)) matches++;
         }
       }
@@ -3840,12 +3861,20 @@ function chooseOpenStringEvents(events,strings){
     const used=new Set();
     let missing=false;
     for(const pitch of event.pitches){
+      // Gap-cover tab: only show notes the main instrument cannot play
+      if(opts.skipIfMainCanPlay && mainCoversMidi(pitch.midi,mainSet)) continue;
+
       const target=pitch.midi+bestShift*12;
       const match=strings.find(s=>s.midi===target && !used.has(s.n));
       if(match){
         chosen.push({...match,sourceMidi:pitch.midi,octaveShift:bestShift});
         used.add(match.n);
-      }else missing=true;
+      }else if(!opts.skipIfMainCanPlay){
+        missing=true;
+      }else{
+        // Gap mode: still mark true gaps with × so player sees unplayable leftovers
+        missing=true;
+      }
     }
     if(missing) chosen.push({section:'K',n:'×',unplayable:true,note:'Not available'});
     if(chosen.length) result.set(event.startChar,chosen);
@@ -3853,11 +3882,84 @@ function chooseOpenStringEvents(events,strings){
   return result;
 }
 
+/** Midis the main open-string instrument can play (exact string pitches). */
+function mainPlayableMidiSet(){
+  refreshKanteleState();
+  return new Set((ACTIVE_KANTELE.strings||[]).map(s=>s.midi));
+}
+
+/**
+ * Pitches the tune uses that the main instrument cannot play (any octave shift).
+ * Returns {midi,count}[] sorted by frequency then pitch.
+ */
+function collectMainGapMidis(){
+  const used=collectTuneMidis();
+  if(!used.length) return [];
+  const main=mainPlayableMidiSet();
+  if(!main.size) return used;
+
+  // A pitch is covered if some main string matches it at any octave shift -3..3
+  function mainCovers(midi){
+    for(let shift=-3;shift<=3;shift++){
+      if(main.has(midi+shift*12)) return true;
+    }
+    return false;
+  }
+
+  return used.filter(u=>!mainCovers(u.midi)).sort((a,b)=>b.count-a.count || a.midi-b.midi);
+}
+
+/**
+ * Autofill strings to cover gap notes first (what main cannot play),
+ * then remaining by key + frequency (same rules as main autofill).
+ */
+function buildGapCoverPitches(count){
+  const gaps=collectMainGapMidis();
+  const key=parseAbcKeyInfo();
+  const scaleSet=new Set(key.scalePcs);
+  const used=collectTuneMidis();
+  const chosen=new Set();
+
+  // 1) Gap notes that are in key, by frequency
+  const gapsInKey=gaps.filter(g=>scaleSet.has(((g.midi%12)+12)%12));
+  for(const g of gapsInKey){
+    if(chosen.size>=count) break;
+    chosen.add(g.midi);
+  }
+  // 2) Remaining gap notes by frequency
+  for(const g of gaps){
+    if(chosen.size>=count) break;
+    chosen.add(g.midi);
+  }
+  // 3) If still room, fall back to normal key-first tune pitches
+  if(chosen.size<count){
+    const rest=buildKanteleAutofillPitches(count);
+    for(const m of rest){
+      if(chosen.size>=count) break;
+      chosen.add(m);
+    }
+  }
+
+  let midis=[...chosen].sort((a,b)=>a-b);
+  if(midis.length>count) midis=midis.slice(0,count);
+  // Prefer keeping lowest gap note on string 1
+  if(gaps.length && !midis.includes(gaps[gaps.length-1]?.midi) && gaps.length){
+    const lowestGap=[...gaps].sort((a,b)=>a.midi-b.midi)[0];
+    if(lowestGap && !midis.includes(lowestGap.midi)){
+      midis.push(lowestGap.midi);
+      midis=[...new Set(midis)].sort((a,b)=>a-b);
+      if(midis.length>count) midis=midis.slice(0,count);
+    }
+  }
+  return midis;
+}
+
 function autofillPartFromTune(partId){
   const part=EXTRA_PARTS.find(p=>p.id===partId);
   if(!part) return;
-  // Temporarily pretend main instrument uses this count so key-first builder works
-  const midis=buildKanteleAutofillPitches(part.stringCount);
+  const midis=part.coverGaps
+    ? buildGapCoverPitches(part.stringCount)
+    : buildKanteleAutofillPitches(part.stringCount);
   part.tuning=midis.map(midiToNoteName);
   renderExtraPartsList();
   buildCourseTable();
@@ -3884,6 +3986,10 @@ function renderExtraPartsList(){
           `<option value="kalimba"${part.instrument==='kalimba'?' selected':''}>Kalimba</option>`+
         `</select></label>`+
         `<label>Strings <select data-field="stringCount">${countOpts}</select></label>`+
+        `<label class="checkbox-control" style="flex-direction:row;align-items:center;gap:4px;">`+
+          `<input type="checkbox" data-field="coverGaps"${part.coverGaps?' checked':''}>`+
+          `<span>Cover notes main cannot play</span>`+
+        `</label>`+
         `<button type="button" data-action="autofill">Autofill</button>`+
         `<button type="button" data-action="remove">Remove</button>`+
       `</div>`+
@@ -3926,6 +4032,14 @@ function renderExtraPartsList(){
       renderExtraPartsList();
       buildCourseTable();
       render();
+    });
+    card.querySelector('[data-field="coverGaps"]').addEventListener('change',e=>{
+      part.coverGaps=!!e.target.checked;
+      if(part.coverGaps) autofillPartFromTune(part.id);
+      else{
+        buildCourseTable();
+        render();
+      }
     });
     card.querySelector('[data-action="autofill"]').addEventListener('click',()=>autofillPartFromTune(part.id));
     card.querySelector('[data-action="remove"]').addEventListener('click',()=>removeExtraPart(part.id));
@@ -6573,7 +6687,11 @@ function render(){
             seen.add(ev.startChar);
             uniq.push(ev);
           }
-          const partMap=chooseOpenStringEvents(uniq,partStrings);
+          const mainMidis=mainPlayableMidiSet();
+          const partMap=chooseOpenStringEvents(uniq,partStrings,{
+            skipIfMainCanPlay:!!part.coverGaps,
+            mainPlayableMidis:mainMidis
+          });
           const partNotes=notesForSystem.map(item=>{
             if(!item.event) return {...item,courses:null};
             return {...item,courses:partMap.get(item.event.startChar)||null};
@@ -6587,7 +6705,8 @@ function render(){
 
           const label=document.createElement('div');
           label.className='part-tab-label';
-          label.textContent=`${part.label} · ${part.stringCount} ${part.instrument==='kalimba'?'keys':'strings'} · 1 = lowest`;
+          const gapNote=part.coverGaps?' · covers main gaps only':'';
+          label.textContent=`${part.label} · ${part.stringCount} ${part.instrument==='kalimba'?'keys':'strings'} · 1 = lowest${gapNote}`;
           block.appendChild(label);
           block.appendChild(partTab);
         }
