@@ -960,7 +960,7 @@ html[data-dark="true"] .tab-number{stroke:#f4f3ef!important}
       </label>
       <div class="kantele-tuning-wrap">
         <span id="openTineTuningLabel">Open-string tuning (lowest = 1)</span>
-        <button id="kanteleAutofillBtn" type="button" title="Analyse the current tune and fill open tines/strings: lowest notes on lowest numbers, prefer naturals, add accidentals only when there are enough tines">Autofill from tune</button>
+        <button id="kanteleAutofillBtn" type="button" title="Fill strings from the tune: song key first, then notes that appear (by frequency). Lowest pitch → string 1. Not stepwise — only pitches that matter.">Autofill from tune</button>
         <div id="kanteleStringInputs" class="kantele-string-inputs"></div>
       </div>
     </div>
@@ -3522,6 +3522,51 @@ function isNaturalMidi(midi){
   return [0,2,4,5,7,9,11].includes(pc); // C D E F G A B
 }
 
+/** Read K: from the ABC editor. Returns {rootPc, mode, name, scalePcs}. */
+function parseAbcKeyInfo(){
+  const abc=document.getElementById('abcInput')?.value || '';
+  const m=abc.match(/^\s*K:\s*([A-Ga-g][#b♯♭]?)\s*(maj|major|min|minor|m|dor|dorian|phr|phrygian|lyd|lydian|mix|mixolydian|loc|locrian|ion|ionian|aeo|aeolian)?/im);
+  let rootLetter='C';
+  let accidental=0;
+  let mode='maj';
+  let name='C';
+  if(m){
+    const raw=(m[1]||'C');
+    rootLetter=raw.charAt(0).toUpperCase();
+    if(/[#♯]/.test(raw)) accidental=1;
+    else if(/[b♭]/.test(raw)) accidental=-1;
+    const mod=(m[2]||'').toLowerCase();
+    if(!mod){
+      // ABC: K:Am means A minor; K:A means A major
+      if(raw.charAt(0)===raw.charAt(0).toLowerCase()) mode='min';
+      else mode='maj';
+    }else if(/^(m|min|minor|aeo|aeolian)$/.test(mod)) mode='min';
+    else if(/^(dor|dorian)$/.test(mod)) mode='dor';
+    else if(/^(phr|phrygian)$/.test(mod)) mode='phr';
+    else if(/^(lyd|lydian)$/.test(mod)) mode='lyd';
+    else if(/^(mix|mixolydian)$/.test(mod)) mode='mix';
+    else if(/^(loc|locrian)$/.test(mod)) mode='loc';
+    else mode='maj';
+    name=rootLetter+(accidental===1?'#':accidental===-1?'b':'')+(mode==='maj'?'':mode==='min'?'m':mode);
+  }
+  const NAT={C:0,D:2,E:4,F:5,G:7,A:9,B:11};
+  let rootPc=((NAT[rootLetter]||0)+accidental+120)%12;
+
+  // Scale intervals from root
+  const MODES={
+    maj:[0,2,4,5,7,9,11],
+    min:[0,2,3,5,7,8,10], // natural minor
+    dor:[0,2,3,5,7,9,10],
+    phr:[0,1,3,5,7,8,10],
+    lyd:[0,2,4,6,7,9,11],
+    mix:[0,2,4,5,7,9,10],
+    loc:[0,1,3,5,6,8,10]
+  };
+  const iv=MODES[mode]||MODES.maj;
+  const scalePcs=iv.map(i=>(rootPc+i)%12);
+  return {rootPc,mode,name,scalePcs};
+}
+
 function collectTuneMidis(){
   const abc=document.getElementById('abcInput')?.value || '';
   if(!abc.trim()) return [];
@@ -3547,88 +3592,121 @@ function collectTuneMidis(){
 /**
  * Build open-string pitches for the current tune.
  *
- * Goal: as few × as possible, lowest tune pitch on string 1.
+ * Priority (highest first):
+ *  1. Key of the song — scale degrees of K: outrank everything else
+ *  2. Notes that actually appear in the tune
+ *  3. Frequency of those notes
+ *  4. Lower pitches preferred when scores tie (string 1 = lowest)
  *
- * 1. Collect every MIDI pitch the tune uses (with frequency).
- * 2. If unique pitches ≤ string count → use all of them, sorted low→high.
- *    Pad with natural steps only if there are spare strings.
- * 3. If unique pitches > string count → keep the most frequent pitches,
- *    always force-include the lowest pitch in the tune, then sort low→high.
- *    Naturals are only preferred when frequencies are equal — accidentals
- *    that the tune actually plays are not dropped in favour of unused naturals.
+ * Notes do NOT need to be stepwise/chromatic. Only pitches that matter
+ * for this tune + key are chosen. Spare strings are filled with other
+ * key-scale degrees in the same register, never random chromatic fill.
  */
 function buildKanteleAutofillPitches(count){
   const used=collectTuneMidis();
+  const key=parseAbcKeyInfo();
+  const scaleSet=new Set(key.scalePcs);
+
   if(!used.length){
+    // No tune: build a key-scale default in a comfortable mid register
     const state=currentOpenTineState();
-    const fallback=state[count] || Object.values(state)[0] || ['C4'];
-    return fallback.slice(0,count).map(name=>{
-      try{ return genericNoteTextToMidi(name); }catch(_){ return 60; }
-    });
+    const fallback=state[count];
+    if(fallback && fallback.length>=count){
+      return fallback.slice(0,count).map(name=>{
+        try{ return genericNoteTextToMidi(name); }catch(_){ return 60; }
+      });
+    }
+    // Generate from key around C4
+    const out=[];
+    let midi=60; // C4
+    // shift so root is near C4
+    while(((midi%12)+12)%12 !== key.rootPc) midi++;
+    if(midi>66) midi-=12;
+    const have=new Set();
+    let guard=0;
+    while(out.length<count && guard++<200){
+      const pc=((midi%12)+12)%12;
+      if(scaleSet.has(pc) && !have.has(midi)){
+        out.push(midi);
+        have.add(midi);
+      }
+      midi++;
+    }
+    return out;
   }
 
   const minMidi=used[0].midi;
   const maxMidi=used[used.length-1].midi;
+  const totalNotes=used.reduce((s,u)=>s+u.count,0)||1;
 
-  // Unique pitches sorted by usefulness: higher frequency first, then lower pitch
-  const byFreq=[...used].sort((a,b)=>b.count-a.count || a.midi-b.midi);
-
-  let chosenMidis;
-
-  if(used.length<=count){
-    // Enough strings for every pitch that appears
-    chosenMidis=used.map(u=>u.midi);
-  }else{
-    // Too many unique pitches: take the most-used ones, always keep the floor
-    const picked=new Set([minMidi]);
-    for(const u of byFreq){
-      if(picked.size>=count) break;
-      picked.add(u.midi);
-    }
-    // If still short (shouldn't be), fill from lowest upward
-    let cand=minMidi;
-    while(picked.size<count && cand<=maxMidi+24){
-      picked.add(cand);
-      cand++;
-    }
-    chosenMidis=[...picked];
+  // Score every used pitch
+  // inKey: large bonus; frequency: primary among in-tune notes; low pitch: slight bias
+  function score(u){
+    const pc=((u.midi%12)+12)%12;
+    const inKey=scaleSet.has(pc)?1:0;
+    const freqNorm=u.count/totalNotes;
+    // Key membership dominates; then frequency; then prefer lower for stable anchoring
+    return inKey*1000 + freqNorm*100 + (1 - (u.midi-minMidi)/Math.max(1,maxMidi-minMidi))*5;
   }
 
-  // Pad with natural notes if we have spare strings
-  chosenMidis=[...new Set(chosenMidis)].sort((a,b)=>a-b);
+  const ranked=[...used].sort((a,b)=>score(b)-score(a) || a.midi-b.midi);
+
+  // Ensure every in-key pitch-class that appears gets at least its lowest occurrence
+  // before we start dropping notes (when string count is tight).
+  const byClass=new Map();
+  for(const u of used){
+    const pc=((u.midi%12)+12)%12;
+    if(!byClass.has(pc) || u.midi<byClass.get(pc).midi) byClass.set(pc,u);
+  }
+  const mustHave=[];
+  for(const pc of key.scalePcs){
+    if(byClass.has(pc)) mustHave.push(byClass.get(pc).midi);
+  }
+  // Also protect the absolute lowest note of the tune
+  if(!mustHave.includes(minMidi)) mustHave.push(minMidi);
+
+  const chosen=new Set();
+
+  // Phase 1: required anchors (in-key classes + floor), limited to count
+  mustHave.sort((a,b)=>a-b);
+  for(const m of mustHave){
+    if(chosen.size>=count) break;
+    chosen.add(m);
+  }
+
+  // Phase 2: fill by score (key first, then frequency) — actual tune pitches only
+  for(const u of ranked){
+    if(chosen.size>=count) break;
+    chosen.add(u.midi);
+  }
+
+  let chosenMidis=[...chosen].sort((a,b)=>a-b);
+
+  // Phase 3: spare strings → other key-scale degrees in the tune’s register
   if(chosenMidis.length<count){
     const have=new Set(chosenMidis);
-    let cand=chosenMidis[chosenMidis.length-1]+1;
-    while(chosenMidis.length<count){
-      if(isNaturalMidi(cand) && !have.has(cand)){
-        chosenMidis.push(cand);
-        have.add(cand);
+    // Walk the range [minMidi-12, maxMidi+12] and add scale tones
+    for(let midi=minMidi-12; midi<=maxMidi+12 && chosenMidis.length<count; midi++){
+      if(midi<12) continue;
+      const pc=((midi%12)+12)%12;
+      if(scaleSet.has(pc) && !have.has(midi)){
+        chosenMidis.push(midi);
+        have.add(midi);
       }
-      cand++;
-      if(cand>maxMidi+36) break;
     }
-    // downward pad if still short
-    cand=chosenMidis[0]-1;
-    while(chosenMidis.length<count && cand>=12){
-      if(isNaturalMidi(cand) && !have.has(cand)){
-        chosenMidis.unshift(cand);
-        have.add(cand);
-      }
-      cand--;
-    }
+    chosenMidis.sort((a,b)=>a-b);
   }
 
-  chosenMidis=[...new Set(chosenMidis)].sort((a,b)=>a-b);
+  // Trim if over (keep highest-scoring, always keep minMidi)
   if(chosenMidis.length>count){
-    // Prefer keeping high-frequency pitches; always keep minMidi
-    const freqMap=new Map(used.map(u=>[u.midi,u.count]));
+    const scoreMap=new Map(used.map(u=>[u.midi,score(u)]));
     const rest=chosenMidis.filter(m=>m!==minMidi)
-      .sort((a,b)=>(freqMap.get(b)||0)-(freqMap.get(a)||0) || a-b);
+      .sort((a,b)=>(scoreMap.get(b)||-1)-(scoreMap.get(a)||-1) || a-b);
     chosenMidis=[minMidi,...rest].slice(0,count);
     chosenMidis.sort((a,b)=>a-b);
   }
 
-  // Final guarantee
+  // Final: guarantee floor
   if(!chosenMidis.includes(minMidi)){
     chosenMidis.push(minMidi);
     chosenMidis=[...new Set(chosenMidis)].sort((a,b)=>a-b);
@@ -3642,6 +3720,7 @@ function autofillKanteleFromTune(){
   if(!isOpenTineInstrument()) return;
 
   const count=selectedKanteleCount();
+  const key=parseAbcKeyInfo();
   const midis=buildKanteleAutofillPitches(count);
   const names=midis.map(midiToNoteName);
 
@@ -3656,8 +3735,8 @@ function autofillKanteleFromTune(){
   const legend=document.getElementById('legendText');
   if(legend){
     const prev=legend.textContent;
-    legend.textContent=`Autofilled ${count} strings from tune · lowest = ${names[0]} · prefer naturals`;
-    setTimeout(()=>{ if(legend.textContent.startsWith('Autofilled')) legend.textContent=prev; },3500);
+    legend.textContent=`Autofilled ${count} · key ${key.name} first · then tune notes by frequency · lowest = ${names[0]}`;
+    setTimeout(()=>{ if(legend.textContent.startsWith('Autofilled')) legend.textContent=prev; },4000);
   }
 }
 
