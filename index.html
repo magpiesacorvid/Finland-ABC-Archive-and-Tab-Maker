@@ -3754,6 +3754,8 @@ function autofillKanteleFromTune(){
   currentOpenTineState()[count]=names;
   renderKanteleInputs();
   refreshInstrumentState();
+  // Gap-cover parts must retune to the new main × notes
+  refreshGapCoverParts();
   buildCourseTable();
   render();
 
@@ -3761,7 +3763,9 @@ function autofillKanteleFromTune(){
   const legend=document.getElementById('legendText');
   if(legend){
     const prev=legend.textContent;
-    legend.textContent=`Autofilled ${count} · key ${key.name} first · then tune notes by frequency · lowest = ${names[0]}`;
+    const gaps=collectMainGapMidis().length;
+    legend.textContent=`Autofilled ${count} · key ${key.name} · lowest = ${names[0]}`+
+      (EXTRA_PARTS.some(p=>p.coverGaps) ? ` · ${gaps} gap pitch(es) for extra parts` : '');
     setTimeout(()=>{ if(legend.textContent.startsWith('Autofilled')) legend.textContent=prev; },4000);
   }
 }
@@ -3820,59 +3824,154 @@ function buildPartStrings(part){
   return strings;
 }
 
-/** True if any main open string matches this concert midi at octave shift -3..3. */
-function mainCoversMidi(midi,mainSet){
-  if(!mainSet || !mainSet.size) return false;
+/** Midis of the main instrument’s open strings. */
+function mainPlayableMidiSet(){
+  refreshKanteleState();
+  return new Set((ACTIVE_KANTELE.strings||[]).map(s=>s.midi));
+}
+
+/**
+ * Same octave-shift policy as the main kantele tab (one shift for the whole tune).
+ * Gaps must use this shift — not “any octave” — or notes the main marks ×
+ * are wrongly treated as covered.
+ */
+function computeOpenStringOctaveShift(events,stringMidis){
+  if(SONG_OCTAVE_SHIFT!==0) return 0;
+  const mainArr=[...stringMidis];
+  if(!mainArr.length) return 0;
+  let bestShift=0,bestMatches=-1;
   for(let shift=-3;shift<=3;shift++){
-    if(mainSet.has(midi+shift*12)) return true;
+    let matches=0;
+    for(const event of events){
+      for(const pitch of event.pitches||[]){
+        if(mainArr.includes(pitch.midi+shift*12)) matches++;
+      }
+    }
+    if(matches>bestMatches || (matches===bestMatches && shift<bestShift)){
+      bestMatches=matches;
+      bestShift=shift;
+    }
   }
-  return false;
+  return bestShift;
+}
+
+/** True if main open strings cover this written midi under the given global shift. */
+function mainCoversMidiAtShift(midi,mainSet,shift){
+  if(!mainSet || !mainSet.size) return false;
+  return mainSet.has(midi+shift*12);
+}
+
+/**
+ * Written pitches in the tune that the main instrument cannot play
+ * under its actual octave shift (same as × on the main tab).
+ */
+function collectMainGapMidis(){
+  const used=collectTuneMidis();
+  if(!used.length) return [];
+  const main=mainPlayableMidiSet();
+  if(!main.size) return used;
+
+  let events=[];
+  try{
+    const abc=document.getElementById('abcInput')?.value || '';
+    events=parseSourceEvents(normaliseNotationInput(abc));
+  }catch(_){}
+
+  const shift=computeOpenStringOctaveShift(events,main);
+  return used
+    .filter(u=>!mainCoversMidiAtShift(u.midi,main,shift))
+    .sort((a,b)=>b.count-a.count || a.midi-b.midi);
+}
+
+/**
+ * Tune extra-part strings to gap pitches (what main marks ×).
+ * Priority: most frequent gaps first, then lower pitch → string 1.
+ * No stepwise fill — only real gap notes from the tune.
+ */
+function buildGapCoverPitches(count){
+  const gaps=collectMainGapMidis();
+  if(!gaps.length){
+    // No gaps — fall back to normal autofill so the part is not empty
+    return buildKanteleAutofillPitches(count);
+  }
+
+  const chosen=[];
+  const have=new Set();
+  // Most frequent gaps first
+  for(const g of gaps){
+    if(chosen.length>=count) break;
+    if(have.has(g.midi)) continue;
+    chosen.push(g.midi);
+    have.add(g.midi);
+  }
+
+  // Spare strings: other gap pitch-classes in nearby octaves if the same class appears
+  if(chosen.length<count){
+    const gapPcs=new Set(gaps.map(g=>((g.midi%12)+12)%12));
+    const minM=Math.min(...gaps.map(g=>g.midi));
+    const maxM=Math.max(...gaps.map(g=>g.midi));
+    for(let m=minM-12;m<=maxM+12 && chosen.length<count;m++){
+      if(m<12) continue;
+      const pc=((m%12)+12)%12;
+      if(gapPcs.has(pc) && !have.has(m)){
+        chosen.push(m);
+        have.add(m);
+      }
+    }
+  }
+
+  let midis=[...chosen].sort((a,b)=>a-b);
+  if(midis.length>count){
+    // Keep highest-frequency gaps; always prefer lowest among ties
+    const freq=new Map(gaps.map(g=>[g.midi,g.count]));
+    midis=[...midis].sort((a,b)=>(freq.get(b)||0)-(freq.get(a)||0) || a-b).slice(0,count);
+    midis.sort((a,b)=>a-b);
+  }
+  return midis;
 }
 
 /**
  * @param {object[]} events
  * @param {object[]} strings
- * @param {{skipIfMainCanPlay?:boolean, mainPlayableMidis?:Set<number>}} [opts]
- * skipIfMainCanPlay: leave blank when main can play the pitch (gap-cover tab)
+ * @param {{skipIfMainCanPlay?:boolean, mainPlayableMidis?:Set<number>, mainShift?:number}} [opts]
  */
 function chooseOpenStringEvents(events,strings,opts={}){
   const result=new Map();
   const mainSet=opts.mainPlayableMidis || null;
+  const mainShift=typeof opts.mainShift==='number'
+    ? opts.mainShift
+    : computeOpenStringOctaveShift(events,mainSet||new Set());
+
+  const stringMidis=strings.map(s=>s.midi);
+  // Prefer shift 0 when strings were tuned to written gap pitches
   let bestShift=0;
   if(SONG_OCTAVE_SHIFT===0){
-    let bestMatches=-1;
-    for(let shift=-3;shift<=3;shift++){
-      let matches=0;
-      for(const event of events){
-        for(const pitch of event.pitches||[]){
-          if(opts.skipIfMainCanPlay && mainCoversMidi(pitch.midi,mainSet)) continue;
-          if(strings.some(s=>s.midi===pitch.midi+shift*12)) matches++;
-        }
-      }
-      if(matches>bestMatches || (matches===bestMatches && shift<bestShift)){
-        bestMatches=matches;
-        bestShift=shift;
-      }
-    }
+    bestShift=computeOpenStringOctaveShift(
+      opts.skipIfMainCanPlay
+        ? events.map(ev=>({
+            ...ev,
+            pitches:(ev.pitches||[]).filter(p=>!mainCoversMidiAtShift(p.midi,mainSet,mainShift))
+          }))
+        : events,
+      new Set(stringMidis)
+    );
   }
+
   for(const event of events){
     if(!event.pitches?.length) continue;
     const chosen=[];
     const used=new Set();
     let missing=false;
     for(const pitch of event.pitches){
-      // Gap-cover tab: only show notes the main instrument cannot play
-      if(opts.skipIfMainCanPlay && mainCoversMidi(pitch.midi,mainSet)) continue;
+      // Only notes the main tab would mark ×
+      if(opts.skipIfMainCanPlay && mainCoversMidiAtShift(pitch.midi,mainSet,mainShift)) continue;
 
       const target=pitch.midi+bestShift*12;
       const match=strings.find(s=>s.midi===target && !used.has(s.n));
       if(match){
         chosen.push({...match,sourceMidi:pitch.midi,octaveShift:bestShift});
         used.add(match.n);
-      }else if(!opts.skipIfMainCanPlay){
-        missing=true;
       }else{
-        // Gap mode: still mark true gaps with × so player sees unplayable leftovers
         missing=true;
       }
     }
@@ -3882,81 +3981,10 @@ function chooseOpenStringEvents(events,strings,opts={}){
   return result;
 }
 
-/** Midis the main open-string instrument can play (exact string pitches). */
-function mainPlayableMidiSet(){
-  refreshKanteleState();
-  return new Set((ACTIVE_KANTELE.strings||[]).map(s=>s.midi));
-}
-
-/**
- * Pitches the tune uses that the main instrument cannot play (any octave shift).
- * Returns {midi,count}[] sorted by frequency then pitch.
- */
-function collectMainGapMidis(){
-  const used=collectTuneMidis();
-  if(!used.length) return [];
-  const main=mainPlayableMidiSet();
-  if(!main.size) return used;
-
-  // A pitch is covered if some main string matches it at any octave shift -3..3
-  function mainCovers(midi){
-    for(let shift=-3;shift<=3;shift++){
-      if(main.has(midi+shift*12)) return true;
-    }
-    return false;
-  }
-
-  return used.filter(u=>!mainCovers(u.midi)).sort((a,b)=>b.count-a.count || a.midi-b.midi);
-}
-
-/**
- * Autofill strings to cover gap notes first (what main cannot play),
- * then remaining by key + frequency (same rules as main autofill).
- */
-function buildGapCoverPitches(count){
-  const gaps=collectMainGapMidis();
-  const key=parseAbcKeyInfo();
-  const scaleSet=new Set(key.scalePcs);
-  const used=collectTuneMidis();
-  const chosen=new Set();
-
-  // 1) Gap notes that are in key, by frequency
-  const gapsInKey=gaps.filter(g=>scaleSet.has(((g.midi%12)+12)%12));
-  for(const g of gapsInKey){
-    if(chosen.size>=count) break;
-    chosen.add(g.midi);
-  }
-  // 2) Remaining gap notes by frequency
-  for(const g of gaps){
-    if(chosen.size>=count) break;
-    chosen.add(g.midi);
-  }
-  // 3) If still room, fall back to normal key-first tune pitches
-  if(chosen.size<count){
-    const rest=buildKanteleAutofillPitches(count);
-    for(const m of rest){
-      if(chosen.size>=count) break;
-      chosen.add(m);
-    }
-  }
-
-  let midis=[...chosen].sort((a,b)=>a-b);
-  if(midis.length>count) midis=midis.slice(0,count);
-  // Prefer keeping lowest gap note on string 1
-  if(gaps.length && !midis.includes(gaps[gaps.length-1]?.midi) && gaps.length){
-    const lowestGap=[...gaps].sort((a,b)=>a.midi-b.midi)[0];
-    if(lowestGap && !midis.includes(lowestGap.midi)){
-      midis.push(lowestGap.midi);
-      midis=[...new Set(midis)].sort((a,b)=>a-b);
-      if(midis.length>count) midis=midis.slice(0,count);
-    }
-  }
-  return midis;
-}
-
 function autofillPartFromTune(partId){
   const part=EXTRA_PARTS.find(p=>p.id===partId);
   if(!part) return;
+  refreshKanteleState();
   const midis=part.coverGaps
     ? buildGapCoverPitches(part.stringCount)
     : buildKanteleAutofillPitches(part.stringCount);
@@ -3964,6 +3992,18 @@ function autofillPartFromTune(partId){
   renderExtraPartsList();
   buildCourseTable();
   render();
+}
+
+/** After main tuning changes, retune gap-cover parts so they track new × notes. */
+function refreshGapCoverParts(){
+  let any=false;
+  for(const part of EXTRA_PARTS){
+    if(!part.coverGaps) continue;
+    const midis=buildGapCoverPitches(part.stringCount);
+    part.tuning=midis.map(midiToNoteName);
+    any=true;
+  }
+  if(any) renderExtraPartsList();
 }
 
 function renderExtraPartsList(){
@@ -4087,6 +4127,7 @@ function renderKanteleInputs(){
       ].map(el=>el.value.trim());
 
       refreshInstrumentState();
+      refreshGapCoverParts();
       buildCourseTable();
       render();
     });
@@ -6688,9 +6729,11 @@ function render(){
             uniq.push(ev);
           }
           const mainMidis=mainPlayableMidiSet();
+          const mainShift=computeOpenStringOctaveShift(uniq,mainMidis);
           const partMap=chooseOpenStringEvents(uniq,partStrings,{
             skipIfMainCanPlay:!!part.coverGaps,
-            mainPlayableMidis:mainMidis
+            mainPlayableMidis:mainMidis,
+            mainShift
           });
           const partNotes=notesForSystem.map(item=>{
             if(!item.event) return {...item,courses:null};
