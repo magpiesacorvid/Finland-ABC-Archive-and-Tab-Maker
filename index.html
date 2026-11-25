@@ -3994,6 +3994,132 @@ function autofillPartFromTune(partId){
   render();
 }
 
+/**
+ * Prefer whole-bar assignment so players do not swap instruments mid-bar.
+ * For each barIndex:
+ *   'main'  — main can play every note → only main tab has numbers
+ *   'extra' — main cannot, but extra can play every note → only extra tab
+ *   'split' — neither alone covers the bar → note-by-note (main + gaps)
+ */
+function planBarAssignments(events,mainSet,mainShift,extraStrings){
+  const byBar=new Map();
+  for(const ev of events){
+    const b=typeof ev.barIndex==='number'?ev.barIndex:0;
+    if(!byBar.has(b)) byBar.set(b,[]);
+    byBar.get(b).push(ev);
+  }
+
+  const extraMidis=extraStrings.map(s=>s.midi);
+  const plan=new Map(); // barIndex -> 'main'|'extra'|'split'
+
+  for(const [bar,list] of byBar){
+    const pitches=[];
+    for(const ev of list){
+      for(const p of ev.pitches||[]) pitches.push(p.midi);
+    }
+    if(!pitches.length){
+      plan.set(bar,'main');
+      continue;
+    }
+
+    const mainAll=pitches.every(m=>mainCoversMidiAtShift(m,mainSet,mainShift));
+    if(mainAll){
+      plan.set(bar,'main');
+      continue;
+    }
+
+    // Can extra cover the whole bar at some single octave shift?
+    let extraAll=false;
+    for(let shift=-3;shift<=3;shift++){
+      const ok=pitches.every(m=>extraMidis.includes(m+shift*12));
+      if(ok){ extraAll=true; break; }
+    }
+    if(extraAll){
+      plan.set(bar,'extra');
+      continue;
+    }
+
+    plan.set(bar,'split');
+  }
+  return plan;
+}
+
+/**
+ * Build course map for extra part honouring bar plan.
+ * - main bars: no numbers
+ * - extra bars: full bar on extra (all notes, not only gaps)
+ * - split bars: gaps only (skip notes main can play)
+ */
+function chooseExtraPartEvents(events,extraStrings,mainSet,mainShift,barPlan,coverGaps){
+  const result=new Map();
+  const extraMidis=extraStrings.map(s=>s.midi);
+
+  // Per-bar best shift for "extra takes whole bar"
+  const barShift=new Map();
+  const byBar=new Map();
+  for(const ev of events){
+    const b=typeof ev.barIndex==='number'?ev.barIndex:0;
+    if(!byBar.has(b)) byBar.set(b,[]);
+    byBar.get(b).push(ev);
+  }
+  for(const [bar,list] of byBar){
+    const pitches=[];
+    for(const ev of list) for(const p of ev.pitches||[]) pitches.push(p.midi);
+    let best=0,bestN=-1;
+    for(let shift=-3;shift<=3;shift++){
+      let n=0;
+      for(const m of pitches) if(extraMidis.includes(m+shift*12)) n++;
+      if(n>bestN || (n===bestN && shift<best)){ bestN=n; best=shift; }
+    }
+    barShift.set(bar,best);
+  }
+
+  for(const event of events){
+    if(!event.pitches?.length) continue;
+    const bar=typeof event.barIndex==='number'?event.barIndex:0;
+    const mode=barPlan.get(bar)||'split';
+
+    if(mode==='main') continue; // whole bar on main only
+
+    const shift=barShift.get(bar)||0;
+    const chosen=[];
+    const used=new Set();
+    let missing=false;
+
+    for(const pitch of event.pitches){
+      if(mode==='split' && coverGaps && mainCoversMidiAtShift(pitch.midi,mainSet,mainShift)){
+        continue; // gap-only within split bars
+      }
+      const target=pitch.midi+shift*12;
+      const match=extraStrings.find(s=>s.midi===target && !used.has(s.n));
+      if(match){
+        chosen.push({...match,sourceMidi:pitch.midi,octaveShift:shift});
+        used.add(match.n);
+      }else{
+        missing=true;
+      }
+    }
+    if(missing) chosen.push({section:'K',n:'×',unplayable:true,note:'Not available'});
+    if(chosen.length) result.set(event.startChar,chosen);
+  }
+  return result;
+}
+
+/** Clear main-tab numbers for bars assigned entirely to the extra part. */
+function applyBarPlanToMainMap(courseMap,events,barPlan){
+  if(!courseMap || !barPlan) return courseMap;
+  const byStart=new Map(events.map(e=>[e.startChar,e]));
+  for(const [startChar,courses] of courseMap){
+    const ev=byStart.get(startChar);
+    if(!ev) continue;
+    const bar=typeof ev.barIndex==='number'?ev.barIndex:0;
+    if(barPlan.get(bar)==='extra'){
+      courseMap.set(startChar,[]); // silent on main — extra owns the bar
+    }
+  }
+  return courseMap;
+}
+
 /** After main tuning changes, retune gap-cover parts so they track new × notes. */
 function refreshGapCoverParts(){
   let any=false;
@@ -6621,7 +6747,21 @@ function render(){
     const baseRenderedAbc=displayAbc(shiftedNotation);
     const renderedAbc=isAnyCifteli()?cifteliMelodyOnlyAbc(baseRenderedAbc):baseRenderedAbc;
     const sourceEvents=parseSourceEvents(renderedAbc);
-    const courseMap=chooseInstrumentEvents(sourceEvents);
+    let courseMap=chooseInstrumentEvents(sourceEvents);
+
+    // Whole-bar preference when a gap-cover extra part exists
+    let activeBarPlan=null;
+    let activeGapPart=null;
+    if(isOpenTineInstrument() && EXTRA_PARTS.some(p=>p.coverGaps)){
+      activeGapPart=EXTRA_PARTS.find(p=>p.coverGaps) || null;
+      if(activeGapPart){
+        const mainMidis=mainPlayableMidiSet();
+        const mainShift=computeOpenStringOctaveShift(sourceEvents,mainMidis);
+        const extraStrings=buildPartStrings(activeGapPart);
+        activeBarPlan=planBarAssignments(sourceEvents,mainMidis,mainShift,extraStrings);
+        courseMap=applyBarPlanToMainMap(courseMap,sourceEvents,activeBarPlan);
+      }
+    }
 
     const title=(notation.match(/^\s*T:\s*(.+)$/m)?.[1]||'').trim();
     if(title){
@@ -6730,11 +6870,12 @@ function render(){
           }
           const mainMidis=mainPlayableMidiSet();
           const mainShift=computeOpenStringOctaveShift(uniq,mainMidis);
-          const partMap=chooseOpenStringEvents(uniq,partStrings,{
-            skipIfMainCanPlay:!!part.coverGaps,
-            mainPlayableMidis:mainMidis,
-            mainShift
-          });
+          const barPlan=part.coverGaps
+            ? (activeBarPlan || planBarAssignments(uniq,mainMidis,mainShift,partStrings))
+            : null;
+          const partMap=part.coverGaps
+            ? chooseExtraPartEvents(uniq,partStrings,mainMidis,mainShift,barPlan||new Map(),true)
+            : chooseOpenStringEvents(uniq,partStrings,{});
           const partNotes=notesForSystem.map(item=>{
             if(!item.event) return {...item,courses:null};
             return {...item,courses:partMap.get(item.event.startChar)||null};
@@ -6748,7 +6889,7 @@ function render(){
 
           const label=document.createElement('div');
           label.className='part-tab-label';
-          const gapNote=part.coverGaps?' · covers main gaps only':'';
+          const gapNote=part.coverGaps?' · gaps / whole bars when possible':'';
           label.textContent=`${part.label} · ${part.stringCount} ${part.instrument==='kalimba'?'keys':'strings'} · 1 = lowest${gapNote}`;
           block.appendChild(label);
           block.appendChild(partTab);
