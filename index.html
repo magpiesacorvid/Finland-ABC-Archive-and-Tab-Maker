@@ -3311,6 +3311,7 @@ const KANTELE_TUNING_STATE={
   9:['A3','B3','C4','D4','E4','F4','G4','A4','B4'],
   10:['A3','B3','C4','D4','E4','F4','G4','A4','B4','C5'],
   12:['G3','A3','B3','C4','D4','E4','F4','G4','A4','B4','C5','D5'],
+  14:['F3','G3','A3','B3','C4','D4','E4','F4','G4','A4','B4','C5','D5','E5'],
   16:['E3','F3','G3','A3','B3','C4','D4','E4','F4','G4','A4','B4','C5','D5','E5','F5'],
   32:['C3','D3','E3','F3','G3','A3','B3','C4','D4','E4','F4','G4','A4','B4','C5','D5','E5','F5','G5','A5','B5','C6','D6','E6','F6','G6','A6','B6','C7','D7','E7','F7']
 };
@@ -3499,7 +3500,7 @@ function selectedKanteleCount(){
     const allowed=[8,10,15,17,21];
     return allowed.includes(n) ? n : 17;
   }
-  const allowed=[5,7,9,10,12,16,32];
+  const allowed=[5,7,9,10,12,14,16,32];
   return allowed.includes(n) ? n : 5;
 }
 
@@ -3772,7 +3773,7 @@ function autofillKanteleFromTune(){
 
 function defaultTuningForPart(instrument,stringCount){
   const table=instrument==='kalimba' ? KALIMBA_TUNING_STATE : KANTELE_TUNING_STATE;
-  const allowed=instrument==='kalimba' ? [8,10,15,17,21] : [5,7,9,10,12,16,32];
+  const allowed=instrument==='kalimba' ? [8,10,15,17,21] : [5,7,9,10,12,14,16,32];
   const n=allowed.includes(stringCount)?stringCount:(instrument==='kalimba'?17:10);
   const base=(table[n]||table[Object.keys(table)[0]]||['C4']).slice();
   while(base.length<n) base.push(base[base.length-1]||'C4');
@@ -4141,7 +4142,7 @@ function renderExtraPartsList(){
     card.className='extra-part-card';
     card.dataset.partId=part.id;
 
-    const allowed=part.instrument==='kalimba'?[8,10,15,17,21]:[5,7,9,10,12,16,32];
+    const allowed=part.instrument==='kalimba'?[8,10,15,17,21]:[5,7,9,10,12,14,16,32];
     const countOpts=allowed.map(n=>`<option value="${n}"${n===part.stringCount?' selected':''}>${n}</option>`).join('');
 
     card.innerHTML=
@@ -4182,7 +4183,7 @@ function renderExtraPartsList(){
     });
     card.querySelector('[data-field="instrument"]').addEventListener('change',e=>{
       part.instrument=e.target.value==='kalimba'?'kalimba':'kantele';
-      const allowed2=part.instrument==='kalimba'?[8,10,15,17,21]:[5,7,9,10,12,16,32];
+      const allowed2=part.instrument==='kalimba'?[8,10,15,17,21]:[5,7,9,10,12,14,16,32];
       if(!allowed2.includes(part.stringCount)) part.stringCount=allowed2[0];
       part.tuning=defaultTuningForPart(part.instrument,part.stringCount);
       renderExtraPartsList();
