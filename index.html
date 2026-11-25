@@ -833,6 +833,17 @@ html[data-dark="true"] .tab-number{stroke:#f4f3ef!important}
 .kantele-note-input{width:4.2em;padding:2px 4px;font-size:0.85rem}
 .kantele-tuning-wrap{display:flex;flex-direction:column;gap:6px;align-items:flex-start}
 #kanteleAutofillBtn{font-size:0.85rem;padding:4px 10px;cursor:pointer;border-radius:4px}
+.extra-parts-control{margin:8px 0;padding:10px;border:1px solid var(--theme-border,#7f9bb8);border-radius:8px;background:var(--theme-soft,#dce8f5);display:flex;flex-direction:column;gap:8px}
+.extra-parts-head{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.extra-parts-head span{font-size:0.85rem;opacity:0.85}
+.extra-parts-list{display:flex;flex-direction:column;gap:10px}
+.extra-part-card{border:1px solid var(--theme-border,#7f9bb8);border-radius:6px;padding:8px;background:var(--theme-score,#fff);display:flex;flex-direction:column;gap:6px}
+.extra-part-card .part-row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.extra-part-card label{display:flex;flex-direction:column;gap:2px;font-size:0.85rem}
+.extra-part-card input[type="text"]{min-width:120px}
+.extra-part-card .part-tuning-inputs{display:flex;flex-wrap:wrap;gap:4px}
+.extra-part-card .part-tuning-inputs input{width:4.2em;font-size:0.85rem}
+.part-tab-label{font-size:0.75rem;font-weight:600;opacity:0.85;margin:2px 0 0 4px}
 .kalimba-tab-import-panel{margin:10px 0;padding:12px;border:1px solid var(--theme-border,#7f9bb8);border-radius:8px;background:var(--theme-soft,#dce8f5);display:flex;flex-direction:column;gap:8px}
 .kalimba-tab-import-head span{display:block;font-size:0.85rem;opacity:0.85;margin-top:2px}
 .kalimba-tab-import-panel label{display:flex;flex-direction:column;gap:4px;font-size:0.9rem}
@@ -963,6 +974,15 @@ html[data-dark="true"] .tab-number{stroke:#f4f3ef!important}
         <button id="kanteleAutofillBtn" type="button" title="Fill strings from the tune: song key first, then notes that appear (by frequency). Lowest pitch → string 1. Not stepwise — only pitches that matter.">Autofill from tune</button>
         <div id="kanteleStringInputs" class="kantele-string-inputs"></div>
       </div>
+    </div>
+
+    <div id="extraPartsControl" class="extra-parts-control" hidden>
+      <div class="extra-parts-head">
+        <strong>Additional parts</strong>
+        <span>e.g. Säkkijärven polkka on a 5-string + a 10-string kantele</span>
+        <button id="addExtraPartBtn" type="button">+ Add part</button>
+      </div>
+      <div id="extraPartsList" class="extra-parts-list"></div>
     </div>
 
     <div id="bayanControl" class="kantele-control" hidden>
@@ -3306,6 +3326,10 @@ const KALIMBA_TUNING_STATE={
 
 let ACTIVE_KANTELE={count:5,strings:[]};
 
+/** Extra kantele/kalimba parts (e.g. 5-string + 10-string on the same tune). */
+let EXTRA_PARTS=[]; // {id, label, instrument:'kantele'|'kalimba', stringCount, tuning:string[]}
+let EXTRA_PART_SEQ=1;
+
 function isKantele(){
   return selectedInstrumentId()==='kantele';
 }
@@ -3740,6 +3764,176 @@ function autofillKanteleFromTune(){
   }
 }
 
+function defaultTuningForPart(instrument,stringCount){
+  const table=instrument==='kalimba' ? KALIMBA_TUNING_STATE : KANTELE_TUNING_STATE;
+  const allowed=instrument==='kalimba' ? [8,10,15,17,21] : [5,7,9,10,12,16,32];
+  const n=allowed.includes(stringCount)?stringCount:(instrument==='kalimba'?17:10);
+  const base=(table[n]||table[Object.keys(table)[0]]||['C4']).slice();
+  while(base.length<n) base.push(base[base.length-1]||'C4');
+  return base.slice(0,n);
+}
+
+function addExtraPart(preset={}){
+  const instrument=preset.instrument==='kalimba'?'kalimba':'kantele';
+  const stringCount=Number(preset.stringCount)|| (instrument==='kalimba'?17:10);
+  const tuning=preset.tuning && preset.tuning.length
+    ? preset.tuning.slice()
+    : defaultTuningForPart(instrument,stringCount);
+  const id='part-'+(EXTRA_PART_SEQ++);
+  const label=preset.label || (instrument==='kalimba'
+    ? `Kalimba ${stringCount}`
+    : `Kantele ${stringCount}`);
+  EXTRA_PARTS.push({id,label,instrument,stringCount,tuning});
+  renderExtraPartsList();
+  render();
+}
+
+function removeExtraPart(id){
+  EXTRA_PARTS=EXTRA_PARTS.filter(p=>p.id!==id);
+  renderExtraPartsList();
+  buildCourseTable();
+  render();
+}
+
+function buildPartStrings(part){
+  const names=(part.tuning||[]).slice(0,part.stringCount);
+  while(names.length<part.stringCount) names.push('C4');
+  const strings=[];
+  for(let i=0;i<part.stringCount;i++){
+    const raw=names[i]||'C4';
+    let midi=60;
+    try{ midi=genericNoteTextToMidi(raw); }catch(_){}
+    strings.push({
+      section:'K',
+      n:String(i+1),
+      stringNumber:i+1,
+      note:midiToNoteName(midi),
+      midi,
+      hz:typeof midiHz==='function'?midiHz(midi):440
+    });
+  }
+  return strings;
+}
+
+function chooseOpenStringEvents(events,strings){
+  const result=new Map();
+  // Octave shift for this string set
+  let bestShift=0;
+  if(SONG_OCTAVE_SHIFT===0){
+    let bestMatches=-1;
+    for(let shift=-3;shift<=3;shift++){
+      let matches=0;
+      for(const event of events){
+        for(const pitch of event.pitches||[]){
+          if(strings.some(s=>s.midi===pitch.midi+shift*12)) matches++;
+        }
+      }
+      if(matches>bestMatches || (matches===bestMatches && shift<bestShift)){
+        bestMatches=matches;
+        bestShift=shift;
+      }
+    }
+  }
+  for(const event of events){
+    if(!event.pitches?.length) continue;
+    const chosen=[];
+    const used=new Set();
+    let missing=false;
+    for(const pitch of event.pitches){
+      const target=pitch.midi+bestShift*12;
+      const match=strings.find(s=>s.midi===target && !used.has(s.n));
+      if(match){
+        chosen.push({...match,sourceMidi:pitch.midi,octaveShift:bestShift});
+        used.add(match.n);
+      }else missing=true;
+    }
+    if(missing) chosen.push({section:'K',n:'×',unplayable:true,note:'Not available'});
+    if(chosen.length) result.set(event.startChar,chosen);
+  }
+  return result;
+}
+
+function autofillPartFromTune(partId){
+  const part=EXTRA_PARTS.find(p=>p.id===partId);
+  if(!part) return;
+  // Temporarily pretend main instrument uses this count so key-first builder works
+  const midis=buildKanteleAutofillPitches(part.stringCount);
+  part.tuning=midis.map(midiToNoteName);
+  renderExtraPartsList();
+  buildCourseTable();
+  render();
+}
+
+function renderExtraPartsList(){
+  const host=document.getElementById('extraPartsList');
+  if(!host) return;
+  host.innerHTML='';
+  for(const part of EXTRA_PARTS){
+    const card=document.createElement('div');
+    card.className='extra-part-card';
+    card.dataset.partId=part.id;
+
+    const allowed=part.instrument==='kalimba'?[8,10,15,17,21]:[5,7,9,10,12,16,32];
+    const countOpts=allowed.map(n=>`<option value="${n}"${n===part.stringCount?' selected':''}>${n}</option>`).join('');
+
+    card.innerHTML=
+      `<div class="part-row">`+
+        `<label>Name <input type="text" data-field="label" value="${part.label.replace(/"/g,'&quot;')}"></label>`+
+        `<label>Type <select data-field="instrument">`+
+          `<option value="kantele"${part.instrument==='kantele'?' selected':''}>Kantele</option>`+
+          `<option value="kalimba"${part.instrument==='kalimba'?' selected':''}>Kalimba</option>`+
+        `</select></label>`+
+        `<label>Strings <select data-field="stringCount">${countOpts}</select></label>`+
+        `<button type="button" data-action="autofill">Autofill</button>`+
+        `<button type="button" data-action="remove">Remove</button>`+
+      `</div>`+
+      `<div class="part-tuning-inputs" data-tuning></div>`;
+
+    const tuningHost=card.querySelector('[data-tuning]');
+    for(let i=0;i<part.stringCount;i++){
+      const inp=document.createElement('input');
+      inp.type='text';
+      inp.value=part.tuning[i]||'';
+      inp.title=`String ${i+1}`;
+      inp.dataset.idx=String(i);
+      inp.addEventListener('change',()=>{
+        part.tuning[i]=inp.value.trim()||part.tuning[i]||'C4';
+        buildCourseTable();
+        render();
+      });
+      tuningHost.appendChild(inp);
+    }
+
+    card.querySelector('[data-field="label"]').addEventListener('change',e=>{
+      part.label=e.target.value.trim()||part.label;
+      render();
+    });
+    card.querySelector('[data-field="instrument"]').addEventListener('change',e=>{
+      part.instrument=e.target.value==='kalimba'?'kalimba':'kantele';
+      const allowed2=part.instrument==='kalimba'?[8,10,15,17,21]:[5,7,9,10,12,16,32];
+      if(!allowed2.includes(part.stringCount)) part.stringCount=allowed2[0];
+      part.tuning=defaultTuningForPart(part.instrument,part.stringCount);
+      renderExtraPartsList();
+      buildCourseTable();
+      render();
+    });
+    card.querySelector('[data-field="stringCount"]').addEventListener('change',e=>{
+      part.stringCount=Number(e.target.value)||part.stringCount;
+      const next=defaultTuningForPart(part.instrument,part.stringCount);
+      // Keep existing pitches where possible
+      for(let i=0;i<Math.min(part.tuning.length,next.length);i++) next[i]=part.tuning[i]||next[i];
+      part.tuning=next;
+      renderExtraPartsList();
+      buildCourseTable();
+      render();
+    });
+    card.querySelector('[data-action="autofill"]').addEventListener('click',()=>autofillPartFromTune(part.id));
+    card.querySelector('[data-action="remove"]').addEventListener('click',()=>removeExtraPart(part.id));
+
+    host.appendChild(card);
+  }
+}
+
 function saveCurrentKanteleInputs(){
   const oldCount=ACTIVE_KANTELE.count || selectedKanteleCount();
   const inputs=[...document.querySelectorAll('.kantele-note-input')];
@@ -3987,6 +4181,8 @@ function refreshInstrumentState(){
   if(ukelinTuningControl) ukelinTuningControl.hidden=true;
   if(genericTuningControl) genericTuningControl.hidden=true;
   if(kanteleControl) kanteleControl.hidden=true;
+  const extraPartsControlEl=document.getElementById('extraPartsControl');
+  if(extraPartsControlEl) extraPartsControlEl.hidden=true;
   const bayanControl=document.getElementById('bayanControl');
   if(bayanControl) bayanControl.hidden=true;
   if(balalaikaStrumControl) balalaikaStrumControl.hidden=true;
@@ -4122,8 +4318,11 @@ function refreshInstrumentState(){
 
   if(isOpenTineInstrument()){
     if(kanteleControl) kanteleControl.hidden=false;
+    const extraPartsControl=document.getElementById('extraPartsControl');
+    if(extraPartsControl) extraPartsControl.hidden=false;
     populateOpenTineCountSelect();
     renderKanteleInputs();
+    renderExtraPartsList();
 
     refreshKanteleState();
 
@@ -6355,6 +6554,45 @@ function render(){
 
       const tab=createTabSvg(scoreSvg,notesForSystem);
       block.appendChild(tab);
+
+      // Additional kantele/kalimba parts (different string counts / tunings)
+      if(isOpenTineInstrument() && EXTRA_PARTS.length){
+        for(const part of EXTRA_PARTS){
+          const partStrings=buildPartStrings(part);
+          const partEvents=notesForSystem
+            .map(item=>{
+              if(!item.event) return null;
+              return item.event;
+            })
+            .filter(Boolean);
+          // Unique events
+          const uniq=[];
+          const seen=new Set();
+          for(const ev of partEvents){
+            if(seen.has(ev.startChar)) continue;
+            seen.add(ev.startChar);
+            uniq.push(ev);
+          }
+          const partMap=chooseOpenStringEvents(uniq,partStrings);
+          const partNotes=notesForSystem.map(item=>{
+            if(!item.event) return {...item,courses:null};
+            return {...item,courses:partMap.get(item.event.startChar)||null};
+          });
+
+          // Temporarily force open-tine layout for this part's string count
+          const saved=ACTIVE_KANTELE;
+          ACTIVE_KANTELE={count:part.stringCount,strings:partStrings};
+          const partTab=createTabSvg(scoreSvg,partNotes);
+          ACTIVE_KANTELE=saved;
+
+          const label=document.createElement('div');
+          label.className='part-tab-label';
+          label.textContent=`${part.label} · ${part.stringCount} ${part.instrument==='kalimba'?'keys':'strings'} · 1 = lowest`;
+          block.appendChild(label);
+          block.appendChild(partTab);
+        }
+      }
+
       bindInteraction(block);
     }
 
@@ -6541,8 +6779,8 @@ function buildCourseTable(){
     const group=document.createElement('div');
     group.className='course-group kantele-course-group';
     const label=isKalimba()
-      ? `${ACTIVE_KANTELE.count}-key Kalimba — open tines (1 = lowest)`
-      : `${ACTIVE_KANTELE.count}-string Kantele — open strings only`;
+      ? `Part 1 · ${ACTIVE_KANTELE.count}-key Kalimba — open tines (1 = lowest)`
+      : `Part 1 · ${ACTIVE_KANTELE.count}-string Kantele — open strings only`;
     group.innerHTML=`<h3>${label}</h3>`;
 
     for(const string of ACTIVE_KANTELE.strings){
@@ -6556,6 +6794,20 @@ function buildCourseTable(){
     }
 
     root.appendChild(group);
+
+    for(const part of EXTRA_PARTS){
+      const g=document.createElement('div');
+      g.className='course-group kantele-course-group';
+      g.innerHTML=`<h3>${part.label} · ${part.stringCount}-${part.instrument==='kalimba'?'key':'string'} ${part.instrument}</h3>`;
+      const strings=buildPartStrings(part);
+      for(const string of strings){
+        const row=document.createElement('div');
+        row.className='course-row';
+        row.innerHTML=`<strong>${string.stringNumber}</strong><span>${string.note}</span><span>${string.hz.toFixed(3)} Hz</span>`;
+        g.appendChild(row);
+      }
+      root.appendChild(g);
+    }
     return;
   }
 
@@ -7801,6 +8053,17 @@ document.getElementById('kanteleStringCount').addEventListener('change',()=>{
 
 document.getElementById('kanteleAutofillBtn')?.addEventListener('click',()=>{
   autofillKanteleFromTune();
+});
+
+document.getElementById('addExtraPartBtn')?.addEventListener('click',()=>{
+  // Default: a second kantele with a different common size than the main one
+  const mainCount=selectedKanteleCount();
+  const alt=mainCount===5?10:mainCount===10?5:mainCount===9?5:10;
+  addExtraPart({
+    instrument:'kantele',
+    stringCount:alt,
+    label:`Kantele ${alt}`
+  });
 });
 
 document.getElementById('bayanSystem')?.addEventListener('change',()=>{
